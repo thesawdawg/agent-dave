@@ -19,15 +19,15 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } f
 import os from "node:os";
 import path from "node:path";
 import { AUDIT_DIR_NAME, AuditLog, DEFAULT_KEEP_DAYS } from "./audit.ts";
+import {
+  type Decision, type Dial, type Mode, type Rule, baseWord, commandParts, DIALS, dialDecision,
+  matchRule, MODES, parseJsonc, parseRules, list, SHELLS, squash, WRITES,
+} from "./rules.ts";
 
-type Mode = "allow" | "ask" | "never" | "check";
 type JudgeLink = { url: string; model: string; apiKey: string; from: string };
 type JudgeRules = { policy: string[]; allowAt: number; timeoutMs: number; coldStartMs: number; ifUnavailable: Mode; maxVerdict: "ask" | "never"; override?: JudgeLink };
 type Judge = JudgeLink & JudgeRules;
-type Dial = "ask-before-everything" | "ask-before-changes" | "ask-before-anything-leaves" | "just-do-it";
-type Rule = { command?: string[]; exact?: boolean; file?: string[]; tool?: string[]; access: "write" | "read" | "any"; mode: Mode; why: string; n: number };
 type Config = { dial: Dial; rules: Rule[]; otherCommands?: Mode; outsideThisFolder: Mode; destructiveTools: Mode; noOneToAsk: "allow" | "never"; judgeRules: JudgeRules; judge?: Judge; keepDays: number; source: string };
-type Decision = { mode: Mode; why: string; source: string; key: string; capped?: boolean };
 // What the guard did with one tool call, filled in as it decides, then written as an audit "call" line.
 type CallNote = { verdict?: Mode; by?: string; answer?: string; lastLook?: string; blocked?: boolean; error?: string };
 
@@ -41,15 +41,6 @@ const KEEP_ALIVE_MIN = 30;
 // The background warm-up's limit. Ollama drops a half-done load when the caller hangs up,
 // so the warm-up waits long enough for a slow CPU-only load to finish; nothing waits on it.
 const WARM_UP_MS = 5 * 60_000;
-const MODES = ["allow", "ask", "never", "check"];
-const DIALS = ["ask-before-everything", "ask-before-changes", "ask-before-anything-leaves", "just-do-it"];
-const SHELLS = new Set(["bash", "powershell"]);
-const WRITES = new Set(["write", "edit"]);
-const READS = new Set(["read", "grep", "find", "ls"]);
-// Tools that never change anything themselves. codemode only runs other tools, and each of those is checked too.
-const HARMLESS = new Set([...READS, "codemode", "tool_search", "ask_user_question"]);
-// Words that run the command after them: sudo rm, env X=1 rm, xargs rm, timeout 5 rm ...
-const WRAPPERS = new Set(["sudo", "doas", "env", "nohup", "time", "nice", "exec", "command", "xargs", "timeout", "watch", "builtin"]);
 
 // If guard.jsonc is missing or broken, the guard doesn't switch off. It asks before every change.
 const FALLBACK: Omit<Config, "source"> = {
@@ -63,29 +54,6 @@ const FALLBACK: Omit<Config, "source"> = {
 };
 
 // ---------- reading guard.jsonc ----------
-// JSON with comments and trailing commas, the way VS Code edits it.
-function parseJsonc(text: string): unknown {
-  let out = "";
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '"') {
-      const start = i;
-      for (i++; i < text.length && text[i] !== '"'; i++) if (text[i] === "\\") i++;
-      out += text.slice(start, i + 1);
-    } else if (c === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-      out += "\n";
-    } else if (c === "/" && text[i + 1] === "*") {
-      const end = text.indexOf("*/", i + 2);
-      out += text.slice(i, end < 0 ? text.length : end + 2).replace(/[^\n]/g, " ");
-      i = end < 0 ? text.length : end + 1;
-    } else out += c;
-  }
-  return JSON.parse(out.replace(/,(\s*[}\]])/g, "$1"));
-}
-
-const list = (v: unknown) => (v === undefined ? undefined : (Array.isArray(v) ? v : [v]).map(String).filter(Boolean));
-
 const cleanUrl = (u: string) => u.trim().replace(/\/+$/, "").replace(/\/v1\/systemone$/, "").replace(/\/v1$/, "");
 function linkFrom(j: any, from: string): JudgeLink {
   const key = String(j.apiKey || "");
@@ -120,23 +88,7 @@ function validate(raw: any, problems: string[]): Omit<Config, "source"> {
     problems.push(`dial: "${raw.dial}" isn't one of ${DIALS.join(", ")}; using ask-before-changes`);
     dial = "ask-before-changes";
   }
-  const rules: Rule[] = [];
-  (Array.isArray(raw.rules) ? raw.rules : []).forEach((r: any, i: number) => {
-    const n = i + 1;
-    const command = list(r?.command), file = list(r?.file), tool = list(r?.tool);
-    const kinds = [command, file, tool].filter(Boolean).length;
-    if (kinds !== 1) return problems.push(`rule ${n}: needs exactly one of "command", "file" or "tool"; skipped`);
-    let ruleMode = r.mode as Mode;
-    if (!MODES.includes(String(r.mode))) {
-      problems.push(`rule ${n}: "mode" should be allow, ask, never or check, not "${r.mode ?? ""}"; asking to be safe`);
-      ruleMode = "ask";
-    }
-    const access = ["write", "read", "any"].includes(r.access) ? r.access : "write";
-    if (r.access !== undefined && access !== r.access) problems.push(`rule ${n}: "access" must be write, read or any; using write`);
-    const what = command ? `run ${command.join(" / ")}` : file ? `${access === "read" ? "read" : "change"} ${file.join(" / ")}` : `use ${tool!.join(" / ")}`;
-    rules.push({ command, exact: r.exact === true && !!command, file, tool, access, mode: ruleMode, why: String(r.why || what), n });
-  });
-  if (!Array.isArray(raw.rules)) problems.push(`"rules" should be a list in [ ... ]; no rules loaded`);
+  const rules = parseRules(raw.rules, problems);
   const noOne = raw.noOneToAsk === "allow" ? "allow" : "never";
   const j = raw.judge && typeof raw.judge === "object" ? raw.judge : {};
   const ifUnavailable = mode(j.ifUnavailable, "judge.ifUnavailable", "ask");
@@ -180,92 +132,6 @@ function validate(raw: any, problems: string[]): Omit<Config, "source"> {
 function rulesSnapshot(config: Config): Record<string, unknown> {
   const { judge, judgeRules: { override: _override, ...judgeSettings }, ...rest } = config;
   return { ...rest, judge: judge ? { ...judgeSettings, url: judge.url, model: judge.model, from: judge.from } : null };
-}
-
-// ---------- matching ----------
-const globRe = (glob: string, flags = "i") =>
-  new RegExp("^" + glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\0").replace(/\*/g, "[^/]*").replace(/\?/g, ".").replace(/\0/g, ".*") + "$", flags);
-const baseWord = (w: string) => w.split(/[\\/]/).pop()!.toLowerCase().replace(/\.(exe|cmd|bat|ps1)$/, "");
-
-// Every simple command in a command line, each as a list of words.
-// "cd x && sudo rm -rf y | tee z" → [cd x] [sudo rm -rf y] [rm -rf y] [tee z]
-// Quoted text is checked as a command too, so bash -c "rm x" doesn't slip past.
-// The simple commands in a command line, one entry per command, each listing the ways it can be
-// read (with and without sudo/env/xargs in front).
-// "cd x && sudo rm -rf y | tee z" → [[cd x]] [[sudo rm -rf y], [rm -rf y]] [[tee z]]
-function commandParts(line: string): { parts: string[][][]; quoted: string[] } {
-  const quoted: string[] = [];
-  const bare = line.replace(/'([^']*)'|"((?:\\.|[^"\\])*)"/g, (_m, a, b) => (quoted.push(a ?? b), " _ "));
-  const parts: string[][][] = [];
-  for (const piece of bare.split(/\|\||&&|[;|&\n()`]|\$\(/)) {
-    const all = piece.trim().split(/\s+/).filter(Boolean);
-    // find ... -exec rm {} runs a second command
-    const starts = [all, ...all.flatMap((w, i) => (/^-(exec|execdir|ok)$/.test(w) ? [all.slice(i + 1)] : []))];
-    for (let words of starts) {
-      const variants: string[][] = [];
-      while (words.length) {
-        variants.push(words);
-        if (/^[A-Za-z_]\w*=/.test(words[0])) { words = words.slice(1); continue; }
-        if (!WRAPPERS.has(baseWord(words[0]))) break;
-        words = words.slice(1);
-        while (words.length && /^(-|\d)/.test(words[0])) words = words.slice(1);
-      }
-      if (variants.length) parts.push(variants);
-    }
-  }
-  return { parts, quoted };
-}
-
-// Every reading of every command, including text in quotes, so bash -c "rm x" doesn't slip past.
-function commandsIn(line: string, depth = 0): string[][] {
-  const { parts, quoted } = commandParts(line);
-  const out = parts.flat();
-  if (depth < 3) for (const q of quoted) out.push(...commandsIn(q, depth + 1));
-  return out;
-}
-
-const squash = (s: string) => s.trim().replace(/\s+/g, " ");
-
-// Does a command rule match this command line?
-// - "exact": the whole line must equal one of the rule's commands.
-// - "allow": every command in the line must be one the rule allows, so "pip install x && rm -rf ~"
-//   isn't waved through by an allow rule for pip install.
-// - "ask", "never", "check": any one command matching is enough.
-function commandRuleMatches(r: Rule, line: string): boolean {
-  if (r.exact) return r.command!.some((p) => squash(p) === squash(line));
-  if (r.mode === "allow") {
-    const { parts } = commandParts(line);
-    return parts.length > 0 && parts.every((variants) => variants.some((words) => r.command!.some((p) => commandMatches(p, words))));
-  }
-  return commandsIn(line).some((words) => r.command!.some((p) => commandMatches(p, words)));
-}
-
-function commandMatches(pattern: string, words: string[]) {
-  const [first, ...rest] = pattern.trim().split(/\s+/);
-  if (!globRe(first.toLowerCase()).test(baseWord(words[0]))) return false;
-  let at = 1;
-  for (const want of rest) {
-    const re = globRe(want);
-    while (at < words.length && !re.test(words[at])) at++;
-    if (at++ >= words.length) return false;
-  }
-  return true;
-}
-
-function fileMatches(pattern: string, target: string, cwd: string) {
-  const flags = process.platform === "win32" ? "i" : "";
-  const slash = (s: string) => s.replaceAll("\\", "/").replace(/\/+$/, "");
-  const abs = slash(target);
-  let p = slash(pattern.trim());
-  if (!p.includes("/")) return abs.split("/").some((part) => globRe(p, flags).test(part));
-  if (p.startsWith("~/")) p = slash(os.homedir()) + p.slice(1);
-  else if (!path.isAbsolute(p)) p = slash(path.resolve(cwd, p));
-  return globRe(p, flags).test(abs) || globRe(p + "/**", flags).test(abs);
-}
-
-function toolMatches(pattern: string, name: string) {
-  const re = globRe(pattern.replace(/[^A-Za-z0-9_*?]/g, "_"));
-  return re.test(name) || re.test(name.split("__").pop()!);
 }
 
 // ---------- the judge: a decision model for what no rule expected ----------
@@ -528,26 +394,10 @@ export default function (pi: ExtensionAPI) {
   // Which rule or setting decides this tool call.
   function decide(config: Config, toolName: string, input: Record<string, unknown>, cwd: string): Decision {
     const rule = (r: Rule): Decision => ({ mode: r.mode, why: r.why, source: `rule ${r.n} in ${config.source}`, key: `rule:${r.n}:${r.why}` });
+    const hit = matchRule(config.rules, toolName, input, cwd);
+    if (hit) return rule(hit);
     const target = typeof input.path === "string" ? path.resolve(cwd, input.path) : undefined;
     const command = SHELLS.has(toolName) ? String(input.command ?? "") : undefined;
-    const commands = command !== undefined ? commandsIn(command) : [];
-
-    // Every word in the command that could be a path, so a file rule also catches "cat .env".
-    const pathWords = commands.flat().flatMap((w) => w.split(/[<>=]/)).filter((w) => w && !w.startsWith("-") && w !== "_");
-    const asPath = (w: string) => path.resolve(cwd, w.replace(/^~(?=[\\/]|$)/, os.homedir()));
-
-    const matches = (r: Rule) => {
-      if (r.command && command !== undefined && commandRuleMatches(r, command)) return true;
-      if (r.file && command !== undefined && r.access !== "write" && pathWords.some((w) => r.file!.some((p) => fileMatches(p, asPath(w), cwd)))) return true;
-      if (r.file && target) {
-        const covers = r.access === "any" || (r.access === "write" ? WRITES.has(toolName) : READS.has(toolName));
-        if (covers && r.file.some((p) => fileMatches(p, target, cwd))) return true;
-      }
-      return !!(r.tool && r.tool.some((p) => toolMatches(p, toolName)));
-    };
-    // "never" rules always win, wherever they sit. Otherwise the first rule that matches decides.
-    for (const r of config.rules) if (r.mode === "never" && matches(r)) return rule(r);
-    for (const r of config.rules) if (matches(r)) return rule(r);
     if (command !== undefined && config.otherCommands) {
       return { mode: config.otherCommands, why: "run this command", source: `otherCommands in ${config.source}`, key: `cmd:${command}` };
     }
@@ -557,11 +407,7 @@ export default function (pi: ExtensionAPI) {
     }
     const hints = pi.getAllTools().find((t) => t.name === toolName)?.annotations;
     if (hints?.destructiveHint === true) return { mode: config.destructiveTools, why: `use ${toolName}`, source: `destructiveTools in ${config.source}`, key: `tool:${toolName}` };
-
-    const dial = (mode: Mode, why: string): Decision => ({ mode, why, source: `dial "${config.dial}"`, key: `dial:${toolName}` });
-    if (config.dial === "ask-before-everything" && toolName !== "codemode") return dial("ask", `use ${toolName}`);
-    if (config.dial === "ask-before-changes" && !HARMLESS.has(toolName) && hints?.readOnlyHint !== true) return dial("ask", `use ${toolName}`);
-    return dial("allow", "do this");
+    return { ...dialDecision(config.dial, toolName, hints?.readOnlyHint), source: `dial "${config.dial}"`, key: `dial:${toolName}` };
   }
 
   // Turn a "check" decision into allow, ask or never by asking the judge.
