@@ -39,6 +39,8 @@ const CONFIG = ".pi/guard.jsonc";
 // The judge's connection lives outside the repo, next to pi's own models.json, so a key never lands in git.
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
 const JUDGE_FILE = path.join(AGENT_DIR, "guard-judge.json");
+// Saved copies of classroom files downloaded from a URL, for when the network is down.
+const CLASSROOM_CACHE = path.join(AGENT_DIR, "guard-classroom");
 const JUDGE_DEFAULTS: JudgeRules = { policy: [], allowAt: 0.8, timeoutMs: 8000, coldStartMs: 30000, ifUnavailable: "ask", maxVerdict: "never" };
 // How long Ollama keeps the judge model loaded after a call. Past this, the next call loads it again.
 const KEEP_ALIVE_MIN = 30;
@@ -425,19 +427,50 @@ export default function (pi: ExtensionAPI) {
 
   // Read the classroom file again when guard.jsonc names a different one or the file changed.
   // Its problems are shown once per reading, and the new rules go in the audit file.
+  // A file is checked on every call (it's cheap); a URL is downloaded only at session start and
+  // with /guard refresh, so a slow network never slows DAVE down.
   function loadClassroom(config: Config, cwd: string, ctx?: any) {
     if (!config.classroom) {
       if (classroom) { classroom = undefined; lesson = undefined; applyLessonTools(); verdicts.clear(); auditRules(config, []); }
       return;
     }
+    if (Classroom.isUrl(config.classroom)) {
+      if (classroom?.spec === config.classroom) return;
+      // guard.jsonc names a new URL: use its saved copy (if any) now, and download it in the background.
+      // No ctx here, so nothing is shown yet: the download reports its own problems a moment later.
+      useClassroom(Classroom.fromCache(config.classroom, CLASSROOM_CACHE), config);
+      void refreshClassroom(config, ctx);
+      return;
+    }
     const file = path.resolve(cwd, config.classroom);
     if (classroom && classroom.file === file && classroom.mtime === mtimeOf(file)) return;
-    classroom = Classroom.load(config.classroom, cwd);
+    useClassroom(Classroom.load(config.classroom, cwd), config, ctx);
+  }
+
+  // Switch to a newly read classroom: drop a lesson it no longer has, match DAVE's tools to the
+  // lesson, forget answers given under the old rules, record the new rules, and show its problems.
+  function useClassroom(next: Classroom, config: Config, ctx?: any) {
+    classroom = next;
     if (lesson !== undefined && !classroom.lessons.has(lesson)) lesson = undefined;
     applyLessonTools(); // the lesson's tools list may have changed with the file
     verdicts.clear();
     auditRules(config, classroom.problems);
     if (ctx?.hasUI && classroom.problems.length) ctx.ui.notify("guard: " + classroom.problems.join("\n  "), "warning");
+  }
+
+  // Download a URL classroom file again. Only one download runs at a time; callers share it.
+  let refreshing: Promise<Classroom | undefined> | undefined;
+  function refreshClassroom(config: Config, ctx?: any): Promise<Classroom | undefined> {
+    const url = config.classroom;
+    if (!url || !Classroom.isUrl(url)) return Promise.resolve(undefined);
+    refreshing ??= Classroom.fetch(url, CLASSROOM_CACHE).then((next) => {
+      refreshing = undefined;
+      // guard.jsonc may have changed while it downloaded; only use it if it still names this URL.
+      if (cache?.config.classroom !== url) return undefined;
+      useClassroom(next, cache.config, ctx);
+      return next;
+    });
+    return refreshing;
   }
 
   // Which rule or setting decides this tool call.
@@ -487,8 +520,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (event, ctx) => {
     lesson = undefined; // a lesson lasts one session; each new one starts with the base rules
+    audit = undefined; // until this session's file opens, changes aren't written to the last session's
     applyLessonTools();
     const { config, problems } = load(ctx.cwd, ctx);
+    // A classroom URL is downloaded once per session, before the session line records which copy is used.
+    await refreshClassroom(config, ctx);
     startAudit(event.reason, config, problems, ctx);
     // Load the judge model now, so the first real check doesn't wait for it. It gets WARM_UP_MS, not
     // coldStartMs: cutting a load short makes Ollama throw it away, and the next call would start over.
@@ -791,8 +827,21 @@ export default function (pi: ExtensionAPI) {
     ].join("\n"), missing.length ? "warning" : "info");
   }
 
+  // /guard refresh: download a classroom URL again now, instead of waiting for the next session.
+  async function refreshCommand(config: Config, ctx: any) {
+    const say = (s: string, level: "info" | "warning" = "info") => ctx.ui.notify(s, level);
+    if (!config.classroom) return say(`No classroom file to refresh. A teacher's file is turned on with "classroom" in ${CONFIG}.`, "warning");
+    if (!Classroom.isUrl(config.classroom)) return say(`The classroom file is ${config.classroom}, on this computer; the guard reads it again whenever it changes.`);
+    say(`Downloading ${config.classroom} …`);
+    const next = await refreshClassroom(config, ctx);
+    if (!next) return;
+    audit?.write("change", { what: "classroom refreshed", detail: `${next.origin} · ${next.label()} · fingerprint ${next.hash || "none"}`, by: "/guard refresh" });
+    const state = { fetched: "downloaded a new copy", unchanged: "the saved copy is current", cached: "couldn't download it, so the saved copy is in use", file: "" }[next.origin];
+    say(`${next.broken ? "The classroom file can't be used" : next.label()}: ${state}.${next.problems.length ? "" : " Lesson: " + (lesson ?? "none") + "."}`, next.problems.length ? "warning" : "info");
+  }
+
   pi.registerCommand("guard", {
-    description: "Safety interlock: show rules, /guard test <cmd>, /guard lesson [name], /guard judge [setup|off], /guard audit [export], /guard off|on",
+    description: "Safety interlock: show rules, /guard test <cmd>, /guard lesson [name], /guard refresh, /guard judge [setup|off], /guard audit [export], /guard off|on",
     handler: async (args, ctx) => {
       const [sub, ...restWords] = (args || "").trim().split(/\s+/);
       const rest = (args || "").trim().slice(sub.length).trim();
@@ -804,6 +853,7 @@ export default function (pi: ExtensionAPI) {
       if (sub === "judge") return judgeCommand(restWords[0] || "", ctx);
       if (sub === "audit") return auditCommand(restWords[0] || "", config, ctx);
       if (sub === "lesson") return lessonCommand(restWords[0] || "", config, ctx);
+      if (sub === "refresh") return refreshCommand(config, ctx);
       if ((sub === "test" || sub === "test-file") && restWords.length) {
         const [toolName, input] = sub === "test" ? ["bash", { command: rest }] : ["write", { path: rest }];
         const { d, layer, student, teacher } = await decideBoth(config, toolName, input, ctx.cwd);
@@ -823,7 +873,7 @@ export default function (pi: ExtensionAPI) {
           ? `  judge: ${config.judge.model} at ${config.judge.url}${config.judge.apiKey ? " (with key)" : ""}, from ${config.judge.from} · allow only at ${Math.round(config.judge.allowAt * 100)}%+ · if unreachable: ${config.judge.ifUnavailable} · strictest verdict: ${config.judge.maxVerdict}`
           : `  judge: not connected. /guard judge setup connects one`,
         classroom
-          ? `  classroom: ${classroom.label()} from ${classroom.spec} · ${classroom.base.rules.length} base rules · lesson: ${lesson ?? "none"} (${classroom.lessons.size} in the file) · /guard lesson`
+          ? `  classroom: ${classroom.label()} from ${classroom.spec}${classroom.fetchedAt ? ` (${classroom.origin === "cached" ? "saved copy" : "downloaded"} ${new Date(classroom.fetchedAt).toLocaleString()})` : ""} · ${classroom.base.rules.length} base rules · lesson: ${lesson ?? "none"} (${classroom.lessons.size} in the file) · /guard lesson`
           : `  classroom: none (add "classroom": "<path>" to ${CONFIG} to use a teacher's file)`,
         `  audit: ${audit ? audit.file : "starts with the session"} · kept ${config.keepDays} days · /guard audit`,
         ...(allowed.size ? [`  allowed this session: ${[...allowed].map((k) => k.split(":").pop()).join(", ")}`] : []),
