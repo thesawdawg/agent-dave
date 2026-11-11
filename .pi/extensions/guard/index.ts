@@ -22,7 +22,7 @@ import { AUDIT_DIR_NAME, AuditLog, DEFAULT_KEEP_DAYS } from "./audit.ts";
 import { Classroom, stricter, type TeacherVerdict } from "./classroom.ts";
 import {
   type Decision, type Dial, type Mode, type Rule, baseWord, commandParts, DIALS, dialDecision,
-  matchRule, MODES, parseJsonc, parseRules, list, SHELLS, squash, WRITES,
+  matchRule, MODES, parseJsonc, parseRules, list, SHELLS, squash, toolMatches, WRITES,
 } from "./rules.ts";
 
 type JudgeLink = { url: string; model: string; apiKey: string; from: string };
@@ -359,6 +359,23 @@ export default function (pi: ExtensionAPI) {
   let auditedHash: string | undefined; // fingerprint of the rules last written to it
   let classroom: Classroom | undefined; // the teacher's file, when guard.jsonc names one
   let lesson: string | undefined; // the lesson picked with /guard lesson, this session
+  let toolsBeforeLesson: string[] | undefined; // DAVE's tools before a lesson narrowed them, to put back after
+  const seenCalls = new Set<string>(); // call ids the guard checked, so calls pi refused itself are still recorded
+
+  // Make DAVE's tools match the lesson: exactly the tools its "tools" list names (* patterns work,
+  // MCP tools too), or, with no list, the tools he had before. Returns what the list named that
+  // no registered tool matched, so the teacher can fix a typo.
+  function applyLessonTools(): { active?: string[]; missing: string[] } {
+    const wanted = classroom?.tools(lesson);
+    if (!wanted) {
+      if (toolsBeforeLesson) { pi.setActiveTools(toolsBeforeLesson); toolsBeforeLesson = undefined; }
+      return { missing: [] };
+    }
+    toolsBeforeLesson ??= pi.getActiveTools();
+    const active = pi.getAllTools().map((t) => t.name).filter((n) => wanted.some((p) => toolMatches(p, n)));
+    pi.setActiveTools(active);
+    return { active, missing: wanted.filter((p) => !active.some((n) => toolMatches(p, n))) };
+  }
 
   // Everything that decides a call, for the audit file: the student's rules and the teacher layer.
   const snapshot = (config: Config) => ({ ...rulesSnapshot(config), classroom: classroom?.snapshot(lesson) ?? null });
@@ -410,13 +427,14 @@ export default function (pi: ExtensionAPI) {
   // Its problems are shown once per reading, and the new rules go in the audit file.
   function loadClassroom(config: Config, cwd: string, ctx?: any) {
     if (!config.classroom) {
-      if (classroom) { classroom = undefined; lesson = undefined; verdicts.clear(); auditRules(config, []); }
+      if (classroom) { classroom = undefined; lesson = undefined; applyLessonTools(); verdicts.clear(); auditRules(config, []); }
       return;
     }
     const file = path.resolve(cwd, config.classroom);
     if (classroom && classroom.file === file && classroom.mtime === mtimeOf(file)) return;
     classroom = Classroom.load(config.classroom, cwd);
     if (lesson !== undefined && !classroom.lessons.has(lesson)) lesson = undefined;
+    applyLessonTools(); // the lesson's tools list may have changed with the file
     verdicts.clear();
     auditRules(config, classroom.problems);
     if (ctx?.hasUI && classroom.problems.length) ctx.ui.notify("guard: " + classroom.problems.join("\n  "), "warning");
@@ -469,6 +487,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (event, ctx) => {
     lesson = undefined; // a lesson lasts one session; each new one starts with the base rules
+    applyLessonTools();
     const { config, problems } = load(ctx.cwd, ctx);
     startAudit(event.reason, config, problems, ctx);
     // Load the judge model now, so the first real check doesn't wait for it. It gets WARM_UP_MS, not
@@ -542,6 +561,7 @@ export default function (pi: ExtensionAPI) {
       note.error = err.message;
       throw err;
     } finally {
+      seenCalls.add(event.toolCallId);
       note.blocked = !!result?.block;
       audit?.write("call", {
         id: event.toolCallId, parent: (event as any).parentToolCallId, tool: event.toolName,
@@ -552,6 +572,10 @@ export default function (pi: ExtensionAPI) {
 
   // How each call ended: ran, failed, or never ran (blocked here or elsewhere). No tool output is kept.
   pi.on("tool_execution_end", async (event) => {
+    // A call pi refused before the guard saw it (a tool the lesson hid, or bad arguments) still gets a call line.
+    if (!seenCalls.delete(event.toolCallId)) {
+      audit?.write("call", { id: event.toolCallId, tool: event.toolName, what: `${event.toolName} (refused by pi before the guard saw it)`, by: "pi: tool not available or invalid call", blocked: true });
+    }
     const outcome = event.durationMs === undefined ? "not run" : event.isError ? "error" : "ok";
     audit?.write("result", { id: event.toolCallId, tool: event.toolName, outcome, ms: event.durationMs });
   });
@@ -734,8 +758,41 @@ export default function (pi: ExtensionAPI) {
     ].join("\n"));
   }
 
+  // /guard lesson [<id> | none]: list the classroom file's lessons, or switch to one for this session.
+  function lessonCommand(id: string, config: Config, ctx: any) {
+    const say = (s: string, level: "info" | "warning" = "info") => ctx.ui.notify(s, level);
+    if (!classroom) return say(`No classroom file. A teacher's file is turned on with "classroom": "<path>" in ${CONFIG}.`, "warning");
+    const describeLesson = (l: { id: string; title: string; tools?: string[]; rules: unknown[] }) =>
+      `${l.id === lesson ? "▸" : " "} ${l.id} · ${l.title} · ${l.rules.length} rules · tools: ${l.tools ? l.tools.join(", ") : "all"}`;
+    if (!id) {
+      if (!classroom.lessons.size) return say(`${classroom.label()} has no lessons; its base rules always apply.`);
+      return say([`Lessons in ${classroom.label()} (now: ${lesson ?? "none, base rules only"}):`, ...[...classroom.lessons.values()].map(describeLesson),
+        `/guard lesson <name> switches · /guard lesson none goes back to the base rules`].join("\n"));
+    }
+    const next = id === "none" ? undefined : id;
+    if (next !== undefined && !classroom.lessons.has(next)) {
+      return say(`No lesson "${id}" in ${classroom.label()}. Lessons: ${[...classroom.lessons.keys()].join(", ") || "none"}.`, "warning");
+    }
+    const before = lesson;
+    lesson = next;
+    // Answers given under the last lesson don't carry over: its rules and the judge's policy differ.
+    allowed.clear();
+    verdicts.clear();
+    const { active, missing } = applyLessonTools();
+    audit?.write("change", { what: "lesson switched", detail: `${before ?? "none"} → ${lesson ?? "none"}`, by: "/guard lesson" });
+    auditRules(config, []);
+    const l = classroom.lesson(lesson);
+    say([
+      l ? `Lesson ${l.id}: ${l.title}` : `No lesson: only the base rules of ${classroom.label()} apply.`,
+      `  ${classroom.base.rules.length} base rules${l ? ` + ${l.rules.length} lesson rules` : ""}`,
+      `  tools: ${active ? active.join(", ") || "none" : "all of DAVE's usual tools"}`,
+      ...(missing.length ? [`  ! no tool matches ${missing.join(", ")} (check the spelling in ${classroom.spec})`] : []),
+      `  session approvals were cleared · /guard test <command> shows how a command is decided now`,
+    ].join("\n"), missing.length ? "warning" : "info");
+  }
+
   pi.registerCommand("guard", {
-    description: "Safety interlock: show rules, /guard test <cmd>, /guard judge [setup|off], /guard audit [export], /guard off|on",
+    description: "Safety interlock: show rules, /guard test <cmd>, /guard lesson [name], /guard judge [setup|off], /guard audit [export], /guard off|on",
     handler: async (args, ctx) => {
       const [sub, ...restWords] = (args || "").trim().split(/\s+/);
       const rest = (args || "").trim().slice(sub.length).trim();
@@ -746,6 +803,7 @@ export default function (pi: ExtensionAPI) {
       if (sub === "on") { on = true; allowed.clear(); verdicts.clear(); audit?.write("change", { what: "guard on", by: "/guard on" }); return say("guard is ON. Session approvals and judge answers were cleared."); }
       if (sub === "judge") return judgeCommand(restWords[0] || "", ctx);
       if (sub === "audit") return auditCommand(restWords[0] || "", config, ctx);
+      if (sub === "lesson") return lessonCommand(restWords[0] || "", config, ctx);
       if ((sub === "test" || sub === "test-file") && restWords.length) {
         const [toolName, input] = sub === "test" ? ["bash", { command: rest }] : ["write", { path: rest }];
         const { d, layer, student, teacher } = await decideBoth(config, toolName, input, ctx.cwd);
