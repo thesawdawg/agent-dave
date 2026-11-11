@@ -145,6 +145,23 @@ And in `presentation-resources/`:
 - **pi-cheat-sheet.pdf:** a one-page `pi` reference to print.
 - **ai-workshop-resources.pdf:** the resources page as a printable handout.
 
+## Working on the wiki
+
+The [GitHub wiki](https://github.com/thesawdawg/agent-dave/wiki) is its own repo, tracked here as a git submodule at `agent-dave.wiki/`. You don't need it to run DAVE.
+
+```bash
+# Clone both at once
+git clone --recurse-submodules git@github.com:thesawdawg/agent-dave
+
+# Or, in an existing clone
+git submodule update --init
+
+# Pull the latest wiki
+git submodule update --remote agent-dave.wiki
+```
+
+Wiki edits are committed and pushed from inside `agent-dave.wiki/`. Then commit the updated `agent-dave.wiki` pointer in this repo so it tracks the new wiki commit.
+
 ## Thanks
 
 A special shoutout to **Raymond Deiser** ([@rdeiser](https://github.com/rdeiser)), who created the [Heartland AI Symposium pi workshop wiki](https://github.com/sawyerb-ksu/heartland-ai-symposium-pi/wiki) and organized its resources. The example kits, skill designer, cheat sheet and resources page in this repo all come from that work.

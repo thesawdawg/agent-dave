@@ -1,0 +1,4 @@
+[submodule "agent-dave.wiki"]
+	path = agent-dave.wiki
+	url = https://github.com/thesawdawg/agent-dave.wiki.git
+	branch = master
