@@ -5,7 +5,9 @@ import path from "node:path";
 
 export type Mode = "allow" | "ask" | "never" | "check";
 export type Dial = "ask-before-everything" | "ask-before-changes" | "ask-before-anything-leaves" | "just-do-it";
-export type Rule = { command?: string[]; exact?: boolean; file?: string[]; tool?: string[]; access: "write" | "read" | "any"; mode: Mode; why: string; n: number };
+// "note": shown to the person when the rule asks or blocks (a teacher's words, say).
+// "where": which list the rule came from in a classroom file ("base", "lesson 2-notes").
+export type Rule = { command?: string[]; exact?: boolean; file?: string[]; tool?: string[]; access: "write" | "read" | "any"; mode: Mode; why: string; note?: string; where?: string; n: number };
 export type Decision = { mode: Mode; why: string; source: string; key: string; capped?: boolean };
 
 export const MODES = ["allow", "ask", "never", "check"];
@@ -66,7 +68,8 @@ export function parseRules(raw: unknown, problems: string[], where = ""): Rule[]
     const access = ["write", "read", "any"].includes(r.access) ? r.access : "write";
     if (r.access !== undefined && access !== r.access) problems.push(`${where}rule ${n}: "access" must be write, read or any; using write`);
     const what = command ? `run ${command.join(" / ")}` : file ? `${access === "read" ? "read" : "change"} ${file.join(" / ")}` : `use ${tool!.join(" / ")}`;
-    rules.push({ command, exact: r.exact === true && !!command, file, tool, access, mode: ruleMode, why: String(r.why || what), n });
+    const note = typeof r.note === "string" && r.note.trim() ? r.note.trim() : undefined;
+    rules.push({ command, exact: r.exact === true && !!command, file, tool, access, mode: ruleMode, why: String(r.why || what), note, n });
   });
   if (!Array.isArray(raw)) problems.push(`${where}"rules" should be a list in [ ... ]; no rules loaded`);
   return rules;

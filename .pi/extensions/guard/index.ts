@@ -19,6 +19,7 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } f
 import os from "node:os";
 import path from "node:path";
 import { AUDIT_DIR_NAME, AuditLog, DEFAULT_KEEP_DAYS } from "./audit.ts";
+import { Classroom, stricter, type TeacherVerdict } from "./classroom.ts";
 import {
   type Decision, type Dial, type Mode, type Rule, baseWord, commandParts, DIALS, dialDecision,
   matchRule, MODES, parseJsonc, parseRules, list, SHELLS, squash, WRITES,
@@ -27,9 +28,12 @@ import {
 type JudgeLink = { url: string; model: string; apiKey: string; from: string };
 type JudgeRules = { policy: string[]; allowAt: number; timeoutMs: number; coldStartMs: number; ifUnavailable: Mode; maxVerdict: "ask" | "never"; override?: JudgeLink };
 type Judge = JudgeLink & JudgeRules;
-type Config = { dial: Dial; rules: Rule[]; otherCommands?: Mode; outsideThisFolder: Mode; destructiveTools: Mode; noOneToAsk: "allow" | "never"; judgeRules: JudgeRules; judge?: Judge; keepDays: number; source: string };
+type Config = { dial: Dial; rules: Rule[]; otherCommands?: Mode; outsideThisFolder: Mode; destructiveTools: Mode; noOneToAsk: "allow" | "never"; judgeRules: JudgeRules; judge?: Judge; keepDays: number; classroom?: string; source: string };
 // What the guard did with one tool call, filled in as it decides, then written as an audit "call" line.
-type CallNote = { verdict?: Mode; by?: string; answer?: string; lastLook?: string; blocked?: boolean; error?: string };
+// "layers": with a classroom file, what each layer said on its own ("ask · rule 2 of base in ...").
+type CallNote = { verdict?: Mode; by?: string; layers?: { student: string; teacher: string }; answer?: string; lastLook?: string; blocked?: boolean; error?: string };
+// The guard's answer for one call: the decision that applies, which layer it came from, and each layer's own.
+type Verdicts = { d: TeacherVerdict; layer: "student" | "teacher"; student: Decision; teacher?: TeacherVerdict };
 
 const CONFIG = ".pi/guard.jsonc";
 // The judge's connection lives outside the repo, next to pi's own models.json, so a key never lands in git.
@@ -115,6 +119,10 @@ function validate(raw: any, problems: string[]): Omit<Config, "source"> {
     if (Number.isInteger(a.keepDays) && a.keepDays >= 1) keepDays = a.keepDays;
     else problems.push(`audit.keepDays: "${a.keepDays}" should be a whole number of days, 1 or more; using ${DEFAULT_KEEP_DAYS}`);
   }
+  // A teacher's classroom file: a path, relative to this folder.
+  let classroom: string | undefined;
+  if (typeof raw.classroom === "string" && raw.classroom.trim()) classroom = raw.classroom.trim();
+  else if (raw.classroom !== undefined) problems.push(`classroom: should be the path to a classroom file, in quotes; no classroom loaded`);
   return {
     dial,
     rules,
@@ -124,6 +132,7 @@ function validate(raw: any, problems: string[]): Omit<Config, "source"> {
     destructiveTools: mode(raw.destructiveTools, "destructiveTools", "ask"),
     noOneToAsk: noOne,
     keepDays,
+    classroom,
   };
 }
 
@@ -348,12 +357,17 @@ export default function (pi: ExtensionAPI) {
   let cache: { file: string; mtime: number; judgeMtime: number; config: Config; problems: string[]; told: boolean } | undefined;
   let audit: AuditLog | undefined; // this session's audit file, opened at session start
   let auditedHash: string | undefined; // fingerprint of the rules last written to it
+  let classroom: Classroom | undefined; // the teacher's file, when guard.jsonc names one
+  let lesson: string | undefined; // the lesson picked with /guard lesson, this session
+
+  // Everything that decides a call, for the audit file: the student's rules and the teacher layer.
+  const snapshot = (config: Config) => ({ ...rulesSnapshot(config), classroom: classroom?.snapshot(lesson) ?? null });
 
   // Write the rules to the audit file when they differ from the last ones written there:
   // guard.jsonc was edited, a rule was saved from a prompt, or the judge connection changed.
   function auditRules(config: Config, problems: string[]) {
     if (!audit) return;
-    const rules = rulesSnapshot(config);
+    const rules = snapshot(config);
     const hash = AuditLog.hash(rules);
     if (hash === auditedHash) return;
     auditedHash = hash;
@@ -388,7 +402,24 @@ export default function (pi: ExtensionAPI) {
       cache.told = true;
       ctx.ui.notify("guard: " + cache.problems.join("\n  "), "warning");
     }
+    loadClassroom(cache.config, cwd, ctx);
     return cache;
+  }
+
+  // Read the classroom file again when guard.jsonc names a different one or the file changed.
+  // Its problems are shown once per reading, and the new rules go in the audit file.
+  function loadClassroom(config: Config, cwd: string, ctx?: any) {
+    if (!config.classroom) {
+      if (classroom) { classroom = undefined; lesson = undefined; verdicts.clear(); auditRules(config, []); }
+      return;
+    }
+    const file = path.resolve(cwd, config.classroom);
+    if (classroom && classroom.file === file && classroom.mtime === mtimeOf(file)) return;
+    classroom = Classroom.load(config.classroom, cwd);
+    if (lesson !== undefined && !classroom.lessons.has(lesson)) lesson = undefined;
+    verdicts.clear();
+    auditRules(config, classroom.problems);
+    if (ctx?.hasUI && classroom.problems.length) ctx.ui.notify("guard: " + classroom.problems.join("\n  "), "warning");
   }
 
   // Which rule or setting decides this tool call.
@@ -418,7 +449,10 @@ export default function (pi: ExtensionAPI) {
     const cacheKey = JSON.stringify(call);
     let v: Verdict | undefined = verdicts.get(cacheKey);
     if (!v) {
-      v = await askJudge(config.judge, call);
+      // The teacher's policy sentences (base, then the lesson's) join the student's. Changing the
+      // lesson or the classroom file clears the cached answers, so they never mix.
+      const policy = [...config.judge.policy, ...(classroom?.policy(lesson) ?? [])];
+      v = await askJudge({ ...config.judge, policy }, call);
       if (!("error" in v)) verdicts.set(cacheKey, v);
     }
     if ("error" in v) return { ...d, mode: config.judge.ifUnavailable, source: `${d.source}; ${v.error}, so judge.ifUnavailable decides` };
@@ -434,6 +468,7 @@ export default function (pi: ExtensionAPI) {
     SHELLS.has(toolName) ? String(input.command ?? "") : typeof input.path === "string" ? `${toolName} ${input.path}` : `${toolName} ${JSON.stringify(input)}`.slice(0, 300);
 
   pi.on("session_start", async (event, ctx) => {
+    lesson = undefined; // a lesson lasts one session; each new one starts with the base rules
     const { config, problems } = load(ctx.cwd, ctx);
     startAudit(event.reason, config, problems, ctx);
     // Load the judge model now, so the first real check doesn't wait for it. It gets WARM_UP_MS, not
@@ -449,11 +484,13 @@ export default function (pi: ExtensionAPI) {
     const file = AuditLog.pathFor(sm.getSessionFile(), sm.getSessionId(), fallbackDir);
     audit = new AuditLog(file, (message) => { if (ctx.hasUI) ctx.ui.notify(message, "warning"); });
     AuditLog.prune([path.dirname(file), fallbackDir], config.keepDays);
-    const rules = rulesSnapshot(config);
+    const rules = snapshot(config);
     auditedHash = AuditLog.hash(rules);
     audit.write("session", {
       reason, sessionId: sm.getSessionId(), sessionFile: sm.getSessionFile() ?? null, folder: ctx.cwd,
-      guard: on ? "on" : "off", source: config.source, dial: config.dial, hash: auditedHash, rules, problems,
+      guard: on ? "on" : "off", source: config.source, dial: config.dial, hash: auditedHash, rules,
+      problems: [...problems, ...(classroom?.problems ?? [])],
+      classroom: classroom ? `${classroom.label()} from ${classroom.spec}` : null, lesson: lesson ?? null,
     });
     if (ctx.hasUI) {
       ctx.ui.notify(`guard: this session's tool calls are recorded in ${file}. The file stays on this computer and is deleted after ${config.keepDays} days. /guard audit shows it.`, "info");
@@ -545,25 +582,39 @@ export default function (pi: ExtensionAPI) {
     return undefined;
   }
 
+  // Both layers decide on their own (the judge answers any "check" first), then the stricter one applies.
+  async function decideBoth(config: Config, toolName: string, input: Record<string, unknown>, cwd: string): Promise<Verdicts> {
+    const student = await resolve(config, decide(config, toolName, input, cwd), toolName, input, cwd);
+    const readOnly = pi.getAllTools().find((t) => t.name === toolName)?.annotations?.readOnlyHint;
+    const asked = classroom?.decide(lesson, toolName, input, cwd, readOnly);
+    const teacher = asked && (await resolve(config, asked, toolName, input, cwd));
+    return { ...stricter(student, teacher), student, teacher };
+  }
+
   async function gate(event: any, ctx: any, note: CallNote) {
     const { config } = load(ctx.cwd, ctx);
     const input = (event.input ?? {}) as Record<string, unknown>;
-    const d = await resolve(config, decide(config, event.toolName, input, ctx.cwd), event.toolName, input, ctx.cwd);
+    const { d, layer, student, teacher } = await decideBoth(config, event.toolName, input, ctx.cwd);
     note.verdict = d.mode;
     note.by = d.source;
+    if (classroom) note.layers = { student: `${student.mode} · ${student.source}`, teacher: teacher ? `${teacher.mode} · ${teacher.source}` : "no opinion" };
+    const teacherNote = d.note ? `\n\n  Teacher's note: ${d.note}` : "";
     let mode = d.mode;
-    if (mode === "ask" && config.dial === "just-do-it") { mode = "allow"; note.answer = "auto: just-do-it dial"; }
+    // The student's just-do-it dial skips the student's own questions, never the teacher's.
+    if (mode === "ask" && config.dial === "just-do-it" && layer === "student") { mode = "allow"; note.answer = "auto: just-do-it dial"; }
     if (mode === "ask" && allowed.has(d.key)) { mode = "allow"; note.answer = "auto: allowed earlier this session"; }
     if (mode === "ask" && !ctx.hasUI) { mode = config.noOneToAsk; note.answer = `auto: nobody to ask (noOneToAsk: ${mode})`; }
     if (mode === "allow") return undefined;
     if (mode === "never") {
-      return { block: true, reason: `guard: DAVE may not ${d.why} (${d.source}). Don't try another way; tell the user what you wanted to do so they can decide.` };
+      if (d.note && ctx.hasUI) ctx.ui.notify(`guard: blocked: ${d.why}.${teacherNote}`, "warning");
+      return { block: true, reason: `guard: DAVE may not ${d.why} (${d.source}).${d.note ? ` The teacher says: ${d.note}` : ""} Don't try another way; tell the user what you wanted to do so they can decide.` };
     }
     const isShell = SHELLS.has(event.toolName);
     const choices = ["Yes, once", "Yes, for the rest of this session", "No"];
     // A call the judge flagged as dangerous can be allowed once or for the session, but not saved as "always".
-    if (isShell) choices.push(...(d.capped ? [ALWAYS_BLOCK] : [ALWAYS_ALLOW, ALWAYS_BLOCK]));
-    const choice = await ctx.ui.select(`guard · DAVE wants to ${d.why}:\n\n  ${describe(event.toolName, input)}\n\n  (${d.source})\n\nAllow it?`, choices);
+    // Nor can a teacher's question: a saved allow rule is the student's, and the stricter layer would still ask.
+    if (isShell) choices.push(...(d.capped || layer === "teacher" ? [ALWAYS_BLOCK] : [ALWAYS_ALLOW, ALWAYS_BLOCK]));
+    const choice = await ctx.ui.select(`guard · DAVE wants to ${d.why}:\n\n  ${describe(event.toolName, input)}\n\n  (${d.source})${teacherNote}\n\nAllow it?`, choices);
     note.answer = choice ?? "dismissed";
     if (choice === ALWAYS_ALLOW || choice === ALWAYS_BLOCK) {
       const saved = await saveRuleFromPrompt(ctx, String(input.command ?? ""), choice === ALWAYS_ALLOW ? "allow" : "never", d);
@@ -697,10 +748,13 @@ export default function (pi: ExtensionAPI) {
       if (sub === "audit") return auditCommand(restWords[0] || "", config, ctx);
       if ((sub === "test" || sub === "test-file") && restWords.length) {
         const [toolName, input] = sub === "test" ? ["bash", { command: rest }] : ["write", { path: rest }];
-        const d = await resolve(config, decide(config, toolName, input, ctx.cwd), toolName, input, ctx.cwd);
-        const mode = d.mode === "ask" && config.dial === "just-do-it" ? "allow (just-do-it)" : d.mode;
+        const { d, layer, student, teacher } = await decideBoth(config, toolName, input, ctx.cwd);
+        const mode = d.mode === "ask" && config.dial === "just-do-it" && layer === "student" ? "allow (just-do-it)" : d.mode;
         const last = catastropheIn(toolName, input, ctx.cwd);
-        return say(`${sub === "test" ? rest : "write " + rest}\n  → ${mode.toUpperCase()}: ${d.why}\n  decided by ${d.source}` +
+        const layers = classroom
+          ? `\n  student layer: ${student.mode} · ${student.source}\n  teacher layer: ${teacher ? `${teacher.mode} · ${teacher.source}` : "no opinion"}${d.note ? `\n  teacher's note: ${d.note}` : ""}`
+          : "";
+        return say(`${sub === "test" ? rest : "write " + rest}\n  → ${mode.toUpperCase()}: ${d.why}\n  decided by ${d.source}${layers}` +
           (last && mode !== "never" ? `\n  → then the LAST LOOK stops it: it could ${last}. It runs only if you type RUN.` : ""));
       }
       const lines = [
@@ -710,6 +764,9 @@ export default function (pi: ExtensionAPI) {
         config.judge
           ? `  judge: ${config.judge.model} at ${config.judge.url}${config.judge.apiKey ? " (with key)" : ""}, from ${config.judge.from} · allow only at ${Math.round(config.judge.allowAt * 100)}%+ · if unreachable: ${config.judge.ifUnavailable} · strictest verdict: ${config.judge.maxVerdict}`
           : `  judge: not connected. /guard judge setup connects one`,
+        classroom
+          ? `  classroom: ${classroom.label()} from ${classroom.spec} · ${classroom.base.rules.length} base rules · lesson: ${lesson ?? "none"} (${classroom.lessons.size} in the file) · /guard lesson`
+          : `  classroom: none (add "classroom": "<path>" to ${CONFIG} to use a teacher's file)`,
         `  audit: ${audit ? audit.file : "starts with the session"} · kept ${config.keepDays} days · /guard audit`,
         ...(allowed.size ? [`  allowed this session: ${[...allowed].map((k) => k.split(":").pop()).join(", ")}`] : []),
         ...problems.map((p) => `  ! ${p}`),

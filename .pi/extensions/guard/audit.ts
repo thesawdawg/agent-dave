@@ -188,7 +188,8 @@ export class AuditLog {
     const starts = lines.filter((l) => l.event === "session");
     if (!starts.length) out.push("No session start was recorded in this file.", "");
     for (const s of starts) {
-      out.push(`- **Session ${cell(s.reason)}** ${when(s.t)} · guard ${cell(s.guard)} · rules from ${cell(s.source)} (fingerprint \`${cell(s.hash)}\`) · dial ${cell(s.dial)}`);
+      const teacher = s.classroom ? ` · classroom ${cell(s.classroom)}, lesson ${cell(s.lesson ?? "none")}` : "";
+      out.push(`- **Session ${cell(s.reason)}** ${when(s.t)} · guard ${cell(s.guard)} · rules from ${cell(s.source)} (fingerprint \`${cell(s.hash)}\`) · dial ${cell(s.dial)}${teacher}`);
     }
     out.push(`- Session id \`${cell(starts[0]?.sessionId)}\` · folder \`${cell(starts[0]?.folder)}\``, "");
 
