@@ -19,6 +19,10 @@ Both are good models for writing your own skill or extension.
 
 To see the safety interlock from slide 29b, run `/guard test rm events.ics` in pi: it should say ASK, decided by the delete-files rule in `.pi/guard.jsonc`.
 
+## classroom/: a teacher's rules
+
+A sample classroom file for the guard: base rules for every lesson, plus three lessons (read-only exploring, note-taking, research) that students switch between with `/guard lesson`. Turn it on with `"classroom"` in `.pi/guard.jsonc`. See [classroom/README.md](classroom/README.md).
+
 ## kits/: more skills to practice on
 
 Three ready-made skills with fictional sample data: **webpage-briefing**, **spreadsheet-check** and **scan-renamer**. Unlike the folders above, each kit is a project of its own: start pi inside the kit folder and its skill loads from `.agents/skills/`. See [kits/README.md](kits/README.md).

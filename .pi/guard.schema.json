@@ -35,6 +35,68 @@
           "minItems": 1
         }
       ]
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "command"
+          ]
+        },
+        {
+          "required": [
+            "file"
+          ]
+        },
+        {
+          "required": [
+            "tool"
+          ]
+        }
+      ],
+      "properties": {
+        "command": {
+          "$ref": "#/definitions/words",
+          "markdownDescription": "Shell commands, matched by their first word (`rm` also catches `/bin/rm` and `sudo rm`). More words must come later in the same command, in order: `git push`. `*` matches anything inside one word: `curl --data*`."
+        },
+        "file": {
+          "$ref": "#/definitions/words",
+          "markdownDescription": "A name with no `/` (`.env`, `*.pem`) matches that file or folder anywhere. A path (`notes/private`) is relative to this folder and covers everything inside it. `~/` is your home folder."
+        },
+        "access": {
+          "enum": [
+            "write",
+            "read",
+            "any"
+          ],
+          "default": "write",
+          "markdownDescription": "For `file` rules: `write` (the default) covers write and edit, `read` covers read, grep, find and ls, `any` covers both."
+        },
+        "tool": {
+          "$ref": "#/definitions/words",
+          "markdownDescription": "A tool by name, such as `bash`, `write`, or an MCP tool like `export_ics`. `*` works here too."
+        },
+        "mode": {
+          "$ref": "#/definitions/mode"
+        },
+        "why": {
+          "type": "string",
+          "markdownDescription": "Finishes the sentence \"DAVE wants to ...\" when the guard asks or blocks."
+        },
+        "exact": {
+          "type": "boolean",
+          "markdownDescription": "For `command` rules: the whole command line must be exactly this text (spaces squeezed). \"Always allow\" in the guard's question saves rules like this."
+        },
+        "note": {
+          "type": "string",
+          "markdownDescription": "Shown to the person when the rule asks or blocks, in your own words. In a classroom file, the teacher's note: `Ask me before adding packages.`"
+        }
+      }
     }
   },
   "properties": {
@@ -60,63 +122,12 @@
       "description": "A \"never\" rule always wins. Otherwise rules are checked top to bottom and the first match decides.",
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "mode"
-        ],
-        "oneOf": [
-          {
-            "required": [
-              "command"
-            ]
-          },
-          {
-            "required": [
-              "file"
-            ]
-          },
-          {
-            "required": [
-              "tool"
-            ]
-          }
-        ],
-        "properties": {
-          "command": {
-            "$ref": "#/definitions/words",
-            "markdownDescription": "Shell commands, matched by their first word (`rm` also catches `/bin/rm` and `sudo rm`). More words must come later in the same command, in order: `git push`. `*` matches anything inside one word: `curl --data*`."
-          },
-          "file": {
-            "$ref": "#/definitions/words",
-            "markdownDescription": "A name with no `/` (`.env`, `*.pem`) matches that file or folder anywhere. A path (`notes/private`) is relative to this folder and covers everything inside it. `~/` is your home folder."
-          },
-          "access": {
-            "enum": [
-              "write",
-              "read",
-              "any"
-            ],
-            "default": "write",
-            "markdownDescription": "For `file` rules: `write` (the default) covers write and edit, `read` covers read, grep, find and ls, `any` covers both."
-          },
-          "tool": {
-            "$ref": "#/definitions/words",
-            "markdownDescription": "A tool by name, such as `bash`, `write`, or an MCP tool like `export_ics`. `*` works here too."
-          },
-          "mode": {
-            "$ref": "#/definitions/mode"
-          },
-          "why": {
-            "type": "string",
-            "markdownDescription": "Finishes the sentence \"DAVE wants to ...\" when the guard asks or blocks."
-          },
-          "exact": {
-            "type": "boolean",
-            "markdownDescription": "For `command` rules: the whole command line must be exactly this text (spaces squeezed). \"Always allow\" in the guard's question saves rules like this."
-          }
-        }
+        "$ref": "#/definitions/rule"
       }
+    },
+    "classroom": {
+      "type": "string",
+      "markdownDescription": "Path to a teacher's classroom file, relative to this folder. Its rules apply on top of yours, and the stricter answer wins. `/guard lesson` switches between its lessons."
     },
     "outsideThisFolder": {
       "$ref": "#/definitions/mode",

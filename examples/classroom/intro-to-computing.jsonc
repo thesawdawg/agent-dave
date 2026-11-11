@@ -1,0 +1,54 @@
+// A sample classroom file: a teacher's rules for DAVE's guard.
+//
+// Turn it on in .pi/guard.jsonc:  "classroom": "examples/classroom/intro-to-computing.jsonc",
+// Then in pi:  /guard lesson             lists the lessons
+//              /guard lesson 1-explore   switches to one (it lasts for the session)
+//              /guard test rm notes.md   shows how both layers decide a command
+//
+// Your rules apply on top of the student's own .pi/guard.jsonc, and the stricter answer wins:
+// allow < ask < never. Same rule language as guard.jsonc; "note" is shown in your words.
+// It guides good-faith students; it isn't a lock. The audit file records the rules in force.
+{
+  "$schema": "../../.pi/classroom.schema.json",
+  "class": "Intro to Computing",
+  "version": "2026-11-11",
+
+  // Always applies, in every lesson and with no lesson picked.
+  "base": {
+    "rules": [
+      { "command": ["pip install", "npm install", "uv add"], "mode": "never", "why": "install packages",
+        "note": "Ask me before adding packages to your computer." },
+      { "command": ["git push"], "mode": "ask", "why": "publish your work",
+        "note": "Check your work with a partner before you push." },
+    ],
+    // Sentences the judge model reads, if one is connected (see "judge" in guard.jsonc).
+    "policy": [
+      "The student may not ask DAVE to write answers for graded work.",
+    ],
+  },
+
+  "lessons": {
+    // Week 1: DAVE can only look. Every other tool is hidden from him.
+    "1-explore": {
+      "title": "Reading files and folders",
+      "tools": ["read", "grep", "find", "ls"],
+    },
+    // Week 2: DAVE may write in notes/ without asking; anything else that changes a file asks.
+    "2-notes": {
+      "title": "Taking notes with DAVE",
+      "dial": "ask-before-changes",
+      "rules": [
+        { "file": "notes", "mode": "allow", "why": "write in your notes folder" },
+      ],
+    },
+    // Week 3: research. The web is fine to read, but nothing is sent or posted.
+    "3-research": {
+      "title": "Researching a topic",
+      "rules": [
+        { "command": ["curl -X*", "curl -d", "curl --data*", "curl -F", "wget --post*"], "mode": "never", "why": "send data to a website",
+          "note": "Reading the web is fine; sending things to it isn't part of this lesson." },
+      ],
+      "policy": ["Fetching public web pages to read them is fine."],
+    },
+  },
+}

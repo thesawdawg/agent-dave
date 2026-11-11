@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DAVE classroom file",
+  "description": "A teacher's rules for DAVE's guard: base rules for every lesson, plus lessons students switch between with /guard lesson. A student's guard.jsonc turns it on with \"classroom\".",
+  "allowTrailingCommas": true,
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "./guard.schema.json#/definitions/rule"
+          },
+          "markdownDescription": "Same rules as guard.jsonc. Add `\"note\"` to explain a question or block in your own words."
+        },
+        "dial": {
+          "$ref": "./guard.schema.json#/properties/dial",
+          "markdownDescription": "Decides calls no rule matched. Leave out to let the student's own settings decide."
+        },
+        "policy": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "markdownDescription": "Plain sentences added to the judge's policy, such as `The student may not ask DAVE to write graded answers.`"
+        }
+      }
+    }
+  },
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "class": {
+      "type": "string",
+      "description": "The class name, shown to students and in the audit file."
+    },
+    "version": {
+      "type": "string",
+      "description": "Your label for this version of the file, such as a date. The audit file records it."
+    },
+    "base": {
+      "$ref": "#/definitions/layer",
+      "description": "Rules, dial and judge policy that apply in every lesson."
+    },
+    "lessons": {
+      "type": "object",
+      "description": "Lessons by name. Students switch with /guard lesson <name>.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "What the lesson is about, shown by /guard lesson."
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "markdownDescription": "The only tools DAVE has in this lesson, MCP tools included; `*` works: `[\"read\", \"grep\", \"find\", \"ls\"]`. Leave out to keep all of them."
+          },
+          "rules": {
+            "$ref": "#/definitions/layer/properties/rules"
+          },
+          "dial": {
+            "$ref": "#/definitions/layer/properties/dial"
+          },
+          "policy": {
+            "$ref": "#/definitions/layer/properties/policy"
+          }
+        }
+      }
+    }
+  }
+}
