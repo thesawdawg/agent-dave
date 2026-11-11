@@ -1,14 +1,17 @@
-// DAVE's safety interlock: the rules guard.ts enforces.
+// DAVE's safety interlock: the rules the guard extension (.pi/extensions/guard/) enforces.
 //
-// guard.ts reads this file before every tool call, so a change works as soon as you save.
-// In pi:  /guard                  shows the rules as guard.ts understands them
+// The guard reads this file before every tool call, so a change works as soon as you save.
+// In pi:  /guard                  shows the rules as the guard understands them
 //         /guard test rm notes.md  shows which rule decides a command
 //         /guard test-file .env    shows which rule decides writing a file
 //         /guard off  /guard on    pauses or resumes the guard for this session
 //
 // After all of this, one last look that no setting here turns off: a short, fixed list of
 // catastrophic commands (rm -rf ~, deleting C:\Windows, formatting a disk ...) stops again and
-// runs only if you type RUN. The list lives in .pi/extensions/guard.ts.
+// runs only if you type RUN. The list lives in .pi/extensions/guard/index.ts.
+//
+// Every session also gets an audit file: each tool call, what the guard decided, your answer,
+// and these rules. It stays on this computer. /guard audit shows where; see "audit" below.
 {
   "$schema": "./guard.schema.json",
 
@@ -73,6 +76,10 @@
   "destructiveTools": "ask",
   // When nobody can answer (print mode, crew workers), "ask" becomes this.
   "noOneToAsk": "never",
+
+  // The audit file: kept this many days, then deleted when a session starts.
+  // /guard audit shows this session's file; /guard audit export writes a readable copy to hand in.
+  "audit": { "keepDays": 14 },
 
   // The judge (advanced): a decision model checks what no rule expected. It has its own
   // connection, separate from the model DAVE chats with. Connect it in pi with

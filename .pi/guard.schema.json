@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "DAVE's safety interlock (guard.ts)",
-  "description": "Rules that .pi/extensions/guard.ts checks before every tool call. Gives VS Code autocomplete and hover help for .pi/guard.jsonc.",
+  "title": "DAVE's safety interlock (the guard extension)",
+  "description": "Rules that .pi/extensions/guard/index.ts checks before every tool call. Gives VS Code autocomplete and hover help for .pi/guard.jsonc.",
   "allowTrailingCommas": true,
   "type": "object",
   "additionalProperties": false,
@@ -132,6 +132,19 @@
         "never"
       ],
       "description": "What \"ask\" becomes when nobody can answer: print mode, or a crew worker."
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The guard records every tool call, its verdict and the rules in force to an audit file on this computer. /guard audit shows it.",
+      "properties": {
+        "keepDays": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 14,
+          "description": "Days to keep each session's audit file. Older files are deleted when a session starts."
+        }
+      }
     },
     "otherCommands": {
       "$ref": "#/definitions/mode",

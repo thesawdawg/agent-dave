@@ -15,7 +15,7 @@ Every part of DAVE is a plain file in this repo. Open the folder in VS Code and 
 | Instruction manuals | Skills DAVE opens only when a task needs one | `.pi/skills/*/SKILL.md` |
 | Drone | MCP servers that live outside DAVE | `.pi/mcp.json`, `mcp/campus-events/` |
 | Upgrade module | Extensions that add tools and commands | `.pi/extensions/hello.ts` |
-| Safety interlock | Checks every tool call against your rules before it runs | `.pi/extensions/guard.ts`, rules in `.pi/guard.jsonc` |
+| Safety interlock | Checks every tool call against your rules before it runs, and records each one | `.pi/extensions/guard/`, rules in `.pi/guard.jsonc` |
 | Black box | Every session, step by step | `/tree`, `/export` in pi |
 | Fleet antenna | Worker DAVEs for a crew | `.pi/agents/*.md` (needs pi-subagents) |
 
@@ -31,7 +31,7 @@ To write your own, copy [templates/my-skill](templates/my-skill/SKILL.md) into `
 - **campus-events** searches the K-State calendar and saves events as `.ics` files. See [its README](mcp/campus-events/README.md).
 
 ### Safety interlock
-`AGENTS.md` *asks* DAVE to check with you before deleting, sending or publishing. [guard.ts](.pi/extensions/guard.ts) *enforces* it, whatever the model decides. Its rules live in [.pi/guard.jsonc](.pi/guard.jsonc), a short file you edit in VS Code. It's read before every tool call, so a change works as soon as you save.
+`AGENTS.md` *asks* DAVE to check with you before deleting, sending or publishing. [the guard](.pi/extensions/guard/index.ts) *enforces* it, whatever the model decides. Its rules live in [.pi/guard.jsonc](.pi/guard.jsonc), a short file you edit in VS Code. It's read before every tool call, so a change works as soon as you save.
 
 Each rule picks a **mode**: `allow` runs it, `ask` asks you first, `never` blocks it. A `never` rule always wins; otherwise rules are checked top to bottom and the first match decides. An `allow` command rule covers a command line only if every command in it is allowed, so `pip install x && rm -rf ~` isn't waved through by a rule for `pip install`. Out of the box:
 
@@ -68,7 +68,16 @@ Then `/guard judge` checks that it answers, `/guard test python3 -c "import os; 
 #### The last look: catastrophic commands
 Rules, the judge and your own "yes" can all be wrong, especially about a command you don't recognize. So right before any command runs, however it was allowed (a rule, **Yes**, **Always allow**, the `just-do-it` dial, even `/guard off`), the guard checks it against a short, fixed list of commands that can wreck a computer: `rm -rf` on `/`, `~` or a system folder, deleting `C:\Windows` or all of `C:`, formatting or overwriting a disk (`format`, `diskpart`, `mkfs`, `dd of=/dev/…`), a fork bomb, `chmod -R` on `/`, deleting Windows restore points or system registry keys, `git push --force` to `main`, and writes into the operating system's own folders. A match stops with a plain explanation of what it would do and runs only if you type `RUN`. With nobody there to type it, it's blocked.
 
-The list is at the top of the "last look" section in [guard.ts](.pi/extensions/guard.ts). It's a seat belt, not a complete list, and it errs on the side of stopping (even `echo rm -rf /` gets a second look). `/guard test rm -rf ~` shows it.
+The list is at the top of the "last look" section in [guard/index.ts](.pi/extensions/guard/index.ts). It's a seat belt, not a complete list, and it errs on the side of stopping (even `echo rm -rf /` gets a second look). `/guard test rm -rf ~` shows it.
+
+#### The audit trail: what DAVE did
+Every session gets an audit file, so you can see exactly what DAVE did. Each tool call is one line: what it was, what the guard decided and why, your answer, and whether it ran. The file starts with the rules in force, and records every change: `/guard off` or `/guard on`, an edit to `.pi/guard.jsonc`, a rule saved from a question, the judge connected or disconnected. It's written even while the guard is off. It never holds tool output or API keys.
+
+- **Where:** a `guard-audit/` folder next to the session file, `~/.pi/agent/sessions/<project>/guard-audit/`. pi's own session file isn't changed. A session that isn't saved (`--no-session`, print mode) uses `~/.pi/agent/guard-audit/`.
+- **How long:** 14 days, then it's deleted when a session starts. Change it with `"audit": { "keepDays": 30 }` in `.pi/guard.jsonc`.
+- **Stays here:** nothing is sent anywhere. Each session says where its file is when it starts.
+
+In pi, `/guard audit` shows this session's file and its totals, and `/guard audit export` writes a readable copy (`guard-audit-<date>-<id>.md`, ignored by git) into this folder: the rules, the changes, and every call the guard asked about or blocked. Open it before you share it.
 
 Want it tighter? Each of these is enforced by pi, not by the model:
 

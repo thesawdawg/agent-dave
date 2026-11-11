@@ -5,6 +5,7 @@ node_modules/
 *.ics
 !checkpoints/**/*.ics
 events.md
+guard-audit-*.md
 
 # Editors and OS
 .vscode/*

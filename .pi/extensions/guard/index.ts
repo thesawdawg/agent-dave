@@ -11,10 +11,14 @@
 // which answers allow, ask or never with a probability for each. See "judge" in guard.jsonc.
 // The judge has its own connection, separate from the model DAVE chats with. Set it up in pi
 // with /guard judge setup (or ./setup.sh --judge); it's saved to ~/.pi/agent/guard-judge.json.
+//
+// Every session also gets an audit file: each tool call, the verdict, who answered, and the rules
+// in force, kept on this computer for "audit.keepDays" (14 by default). See audit.ts; /guard audit shows it.
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { AUDIT_DIR_NAME, AuditLog, DEFAULT_KEEP_DAYS } from "./audit.ts";
 
 type Mode = "allow" | "ask" | "never" | "check";
 type JudgeLink = { url: string; model: string; apiKey: string; from: string };
@@ -22,8 +26,10 @@ type JudgeRules = { policy: string[]; allowAt: number; timeoutMs: number; coldSt
 type Judge = JudgeLink & JudgeRules;
 type Dial = "ask-before-everything" | "ask-before-changes" | "ask-before-anything-leaves" | "just-do-it";
 type Rule = { command?: string[]; exact?: boolean; file?: string[]; tool?: string[]; access: "write" | "read" | "any"; mode: Mode; why: string; n: number };
-type Config = { dial: Dial; rules: Rule[]; otherCommands?: Mode; outsideThisFolder: Mode; destructiveTools: Mode; noOneToAsk: "allow" | "never"; judgeRules: JudgeRules; judge?: Judge; source: string };
+type Config = { dial: Dial; rules: Rule[]; otherCommands?: Mode; outsideThisFolder: Mode; destructiveTools: Mode; noOneToAsk: "allow" | "never"; judgeRules: JudgeRules; judge?: Judge; keepDays: number; source: string };
 type Decision = { mode: Mode; why: string; source: string; key: string; capped?: boolean };
+// What the guard did with one tool call, filled in as it decides, then written as an audit "call" line.
+type CallNote = { verdict?: Mode; by?: string; answer?: string; lastLook?: string; blocked?: boolean; error?: string };
 
 const CONFIG = ".pi/guard.jsonc";
 // The judge's connection lives outside the repo, next to pi's own models.json, so a key never lands in git.
@@ -53,6 +59,7 @@ const FALLBACK: Omit<Config, "source"> = {
   destructiveTools: "ask",
   noOneToAsk: "never",
   judgeRules: JUDGE_DEFAULTS,
+  keepDays: DEFAULT_KEEP_DAYS,
 };
 
 // ---------- reading guard.jsonc ----------
@@ -149,6 +156,13 @@ function validate(raw: any, problems: string[]): Omit<Config, "source"> {
     // A "url" written straight into guard.jsonc wins over the saved connection (one project, one judge).
     override: String(j.url || "").trim() ? linkFrom(j, CONFIG) : undefined,
   };
+  // How long audit files are kept. A whole number of days, at least 1.
+  const a = raw.audit && typeof raw.audit === "object" ? raw.audit : {};
+  let keepDays = DEFAULT_KEEP_DAYS;
+  if (a.keepDays !== undefined) {
+    if (Number.isInteger(a.keepDays) && a.keepDays >= 1) keepDays = a.keepDays;
+    else problems.push(`audit.keepDays: "${a.keepDays}" should be a whole number of days, 1 or more; using ${DEFAULT_KEEP_DAYS}`);
+  }
   return {
     dial,
     rules,
@@ -157,7 +171,15 @@ function validate(raw: any, problems: string[]): Omit<Config, "source"> {
     outsideThisFolder: mode(raw.outsideThisFolder, "outsideThisFolder", "ask"),
     destructiveTools: mode(raw.destructiveTools, "destructiveTools", "ask"),
     noOneToAsk: noOne,
+    keepDays,
   };
+}
+
+// The rules as the guard understands them, for the audit file: everything that decides a call,
+// and never the judge's API key.
+function rulesSnapshot(config: Config): Record<string, unknown> {
+  const { judge, judgeRules: { override: _override, ...judgeSettings }, ...rest } = config;
+  return { ...rest, judge: judge ? { ...judgeSettings, url: judge.url, model: judge.model, from: judge.from } : null };
 }
 
 // ---------- matching ----------
@@ -458,6 +480,19 @@ export default function (pi: ExtensionAPI) {
   const allowed = new Set<string>(); // "Yes, for the rest of this session" answers
   const verdicts = new Map<string, { mode: Mode; detail: string }>(); // judge answers, per command, this session
   let cache: { file: string; mtime: number; judgeMtime: number; config: Config; problems: string[]; told: boolean } | undefined;
+  let audit: AuditLog | undefined; // this session's audit file, opened at session start
+  let auditedHash: string | undefined; // fingerprint of the rules last written to it
+
+  // Write the rules to the audit file when they differ from the last ones written there:
+  // guard.jsonc was edited, a rule was saved from a prompt, or the judge connection changed.
+  function auditRules(config: Config, problems: string[]) {
+    if (!audit) return;
+    const rules = rulesSnapshot(config);
+    const hash = AuditLog.hash(rules);
+    if (hash === auditedHash) return;
+    auditedHash = hash;
+    audit.write("change", { what: "rules reloaded", source: config.source, hash, rules, problems });
+  }
 
   function load(cwd: string, ctx?: any): { config: Config; problems: string[] } {
     const file = path.join(cwd, CONFIG);
@@ -481,6 +516,7 @@ export default function (pi: ExtensionAPI) {
       if (link) config.judge = { ...config.judgeRules, ...link };
       cache = { file, mtime, judgeMtime, config, problems, told: false };
       verdicts.clear();
+      auditRules(config, problems);
     }
     if (ctx?.hasUI && cache.problems.length && !cache.told) {
       cache.told = true;
@@ -551,12 +587,32 @@ export default function (pi: ExtensionAPI) {
   const describe = (toolName: string, input: Record<string, unknown>) =>
     SHELLS.has(toolName) ? String(input.command ?? "") : typeof input.path === "string" ? `${toolName} ${input.path}` : `${toolName} ${JSON.stringify(input)}`.slice(0, 300);
 
-  pi.on("session_start", async (_event, ctx) => {
-    const { config } = load(ctx.cwd, ctx);
+  pi.on("session_start", async (event, ctx) => {
+    const { config, problems } = load(ctx.cwd, ctx);
+    startAudit(event.reason, config, problems, ctx);
     // Load the judge model now, so the first real check doesn't wait for it. It gets WARM_UP_MS, not
     // coldStartMs: cutting a load short makes Ollama throw it away, and the next call would start over.
     if (config.judge) void askJudge(config.judge, { tool: "bash", command: "ls", folder: ctx.cwd }, WARM_UP_MS);
   });
+
+  // Open this session's audit file, clear out old ones, write the session line, and say so.
+  // A resumed session appends to the file it already has.
+  function startAudit(reason: string, config: Config, problems: string[], ctx: any) {
+    const sm = ctx.sessionManager;
+    const fallbackDir = path.join(AGENT_DIR, AUDIT_DIR_NAME);
+    const file = AuditLog.pathFor(sm.getSessionFile(), sm.getSessionId(), fallbackDir);
+    audit = new AuditLog(file, (message) => { if (ctx.hasUI) ctx.ui.notify(message, "warning"); });
+    AuditLog.prune([path.dirname(file), fallbackDir], config.keepDays);
+    const rules = rulesSnapshot(config);
+    auditedHash = AuditLog.hash(rules);
+    audit.write("session", {
+      reason, sessionId: sm.getSessionId(), sessionFile: sm.getSessionFile() ?? null, folder: ctx.cwd,
+      guard: on ? "on" : "off", source: config.source, dial: config.dial, hash: auditedHash, rules, problems,
+    });
+    if (ctx.hasUI) {
+      ctx.ui.notify(`guard: this session's tool calls are recorded in ${file}. The file stays on this computer and is deleted after ${config.keepDays} days. /guard audit shows it.`, "info");
+    }
+  }
 
   // "Always allow" / "Always block": save a rule at the top of guard.jsonc, so the answer sticks.
   async function saveRuleFromPrompt(ctx: any, command: string, mode: "allow" | "never", d: Decision): Promise<Mode | undefined> {
@@ -586,41 +642,73 @@ export default function (pi: ExtensionAPI) {
     const indent = at[1] + "  ";
     const insert = `${indent}${note}\n${indent}{ ${Object.entries(rule).map(([k, v]) => `${JSON.stringify(k)}: ${JSON.stringify(v)}`).join(", ")} },\n`;
     writeFileSync(file, text.slice(0, at.index + at[0].length) + insert + text.slice(at.index + at[0].length));
+    audit?.write("change", { what: `rule saved: ${verb.toLowerCase()}`, detail: JSON.stringify(rule), by: "guard prompt" });
     ctx.ui.notify(`guard: saved rule 1 in ${CONFIG}: ${mode} ${exact ? "this exact command" : `any "${prefix}" command`}. Edit or delete it there any time.`, "info");
     return mode;
   }
 
+  // Every tool call goes through here, with the guard on or off, and leaves one audit "call" line.
   pi.on("tool_call", async (event, ctx) => {
-    const verdict = on ? await gate(event, ctx) : undefined;
-    if (verdict) return verdict;
-    return lastLook(event, ctx);
+    const input = (event.input ?? {}) as Record<string, unknown>;
+    const note: CallNote = on ? {} : { by: "guard off (/guard off)" };
+    let result: { block: true; reason: string } | undefined;
+    try {
+      result = (on ? await gate(event, ctx, note) : undefined) ?? (await lastLook(event, ctx, note));
+      return result;
+    } catch (err: any) {
+      note.error = err.message;
+      throw err;
+    } finally {
+      note.blocked = !!result?.block;
+      audit?.write("call", {
+        id: event.toolCallId, parent: (event as any).parentToolCallId, tool: event.toolName,
+        what: AuditLog.shorten(describe(event.toolName, input)), ...note,
+      });
+    }
   });
 
+  // How each call ended: ran, failed, or never ran (blocked here or elsewhere). No tool output is kept.
+  pi.on("tool_execution_end", async (event) => {
+    const outcome = event.durationMs === undefined ? "not run" : event.isError ? "error" : "ok";
+    audit?.write("result", { id: event.toolCallId, tool: event.toolName, outcome, ms: event.durationMs });
+  });
+
+  // Record the last look's answer after any earlier one ("Yes, once; last look: typed RUN").
+  // An automatic earlier answer is replaced, so a person's answer is what the audit counts.
+  function addAnswer(note: CallNote, text: string) {
+    note.answer = note.answer && !note.answer.startsWith("auto") ? `${note.answer}; ${text}` : text;
+  }
+
   // The last look: runs after everything else said yes (see CATASTROPHES).
-  async function lastLook(event: any, ctx: any) {
+  async function lastLook(event: any, ctx: any, note: CallNote) {
     const input = (event.input ?? {}) as Record<string, unknown>;
     const what = catastropheIn(event.toolName, input, ctx.cwd);
     if (!what) return undefined;
+    note.lastLook = what;
     const reason = `guard: this would ${what}. It's on the guard's catastrophic list, so it doesn't run without the user typing RUN. Don't try another way; explain to the user what you were trying to do.`;
-    if (!ctx.hasUI) return { block: true, reason };
+    if (!ctx.hasUI) { addAnswer(note, "auto: last look, nobody to type RUN"); return { block: true, reason }; }
     const choice = await ctx.ui.select(
       `guard · STOP. This could ${what}.\n\n  ${describe(event.toolName, input)}\n\nIt was allowed, but it's on the guard's list of catastrophic commands. Are you sure?`,
       ["No, block it", "I understand the risk, let me confirm"],
     );
-    if (choice !== "I understand the risk, let me confirm") return { block: true, reason };
+    if (choice !== "I understand the risk, let me confirm") { addAnswer(note, `last look: ${choice ?? "dismissed"}`); return { block: true, reason }; }
     const typed = await ctx.ui.input("Type RUN to run it. Anything else blocks it.", "");
-    if ((typed || "").trim() !== "RUN") return { block: true, reason };
+    const ran = (typed || "").trim() === "RUN";
+    addAnswer(note, `last look: ${ran ? "typed RUN" : "didn't type RUN"}`);
+    if (!ran) return { block: true, reason };
     return undefined;
   }
 
-  async function gate(event: any, ctx: any) {
+  async function gate(event: any, ctx: any, note: CallNote) {
     const { config } = load(ctx.cwd, ctx);
     const input = (event.input ?? {}) as Record<string, unknown>;
     const d = await resolve(config, decide(config, event.toolName, input, ctx.cwd), event.toolName, input, ctx.cwd);
+    note.verdict = d.mode;
+    note.by = d.source;
     let mode = d.mode;
-    if (mode === "ask" && config.dial === "just-do-it") mode = "allow";
-    if (mode === "ask" && allowed.has(d.key)) mode = "allow";
-    if (mode === "ask" && !ctx.hasUI) mode = config.noOneToAsk;
+    if (mode === "ask" && config.dial === "just-do-it") { mode = "allow"; note.answer = "auto: just-do-it dial"; }
+    if (mode === "ask" && allowed.has(d.key)) { mode = "allow"; note.answer = "auto: allowed earlier this session"; }
+    if (mode === "ask" && !ctx.hasUI) { mode = config.noOneToAsk; note.answer = `auto: nobody to ask (noOneToAsk: ${mode})`; }
     if (mode === "allow") return undefined;
     if (mode === "never") {
       return { block: true, reason: `guard: DAVE may not ${d.why} (${d.source}). Don't try another way; tell the user what you wanted to do so they can decide.` };
@@ -630,6 +718,7 @@ export default function (pi: ExtensionAPI) {
     // A call the judge flagged as dangerous can be allowed once or for the session, but not saved as "always".
     if (isShell) choices.push(...(d.capped ? [ALWAYS_BLOCK] : [ALWAYS_ALLOW, ALWAYS_BLOCK]));
     const choice = await ctx.ui.select(`guard · DAVE wants to ${d.why}:\n\n  ${describe(event.toolName, input)}\n\n  (${d.source})\n\nAllow it?`, choices);
+    note.answer = choice ?? "dismissed";
     if (choice === ALWAYS_ALLOW || choice === ALWAYS_BLOCK) {
       const saved = await saveRuleFromPrompt(ctx, String(input.command ?? ""), choice === ALWAYS_ALLOW ? "allow" : "never", d);
       if (saved === "allow") return undefined;
@@ -654,6 +743,7 @@ export default function (pi: ExtensionAPI) {
 
     if (action === "off") {
       saveJudgeFile(undefined);
+      audit?.write("change", { what: "judge disconnected", by: "/guard judge off" });
       const { config } = load(ctx.cwd);
       if (config.otherCommands === "check" && mtimeOf(file) >= 0) setOtherCommands(file, undefined);
       verdicts.clear();
@@ -696,6 +786,7 @@ export default function (pi: ExtensionAPI) {
         if (keep !== "Save anyway") return say("Nothing saved.", "warning");
       }
       saveJudgeFile({ url, model, apiKey });
+      audit?.write("change", { what: "judge connected", detail: `${model} at ${url}`, by: "/guard judge setup" });
       verdicts.clear();
       const { config } = load(ctx.cwd);
       let routed = config.otherCommands === "check";
@@ -726,17 +817,38 @@ export default function (pi: ExtensionAPI) {
     ].join("\n"));
   }
 
+  // /guard audit [export]: where this session's audit file is, or a readable copy to hand in.
+  function auditCommand(action: string, config: Config, ctx: any) {
+    const say = (s: string, level: "info" | "warning" = "info") => ctx.ui.notify(s, level);
+    if (!audit) return say("No audit file is open yet; it starts with the session.", "warning");
+    if (action === "export") {
+      const name = `guard-audit-${new Date().toLocaleDateString("en-CA")}-${ctx.sessionManager.getSessionId().slice(0, 8)}.md`;
+      const out = path.join(ctx.cwd, name);
+      writeFileSync(out, audit.toMarkdown());
+      audit.write("change", { what: "audit exported", detail: out, by: "/guard audit export" });
+      return say(`guard: wrote a readable copy of this session's audit to ${name}. Open it in VS Code before you share it.`);
+    }
+    const { calls, allowed: ran, asked, blocked } = audit.counts();
+    say([
+      `audit file: ${audit.file}`,
+      `  ${calls} tool calls so far: ${ran} ran without a question, ${asked} asked about, ${blocked} blocked`,
+      `  it stays on this computer and is deleted after ${config.keepDays} days ("audit": { "keepDays" } in ${CONFIG})`,
+      `/guard audit export writes a readable copy into this folder, for handing in`,
+    ].join("\n"));
+  }
+
   pi.registerCommand("guard", {
-    description: "Safety interlock: show rules, /guard test <cmd>, /guard judge [setup|off], /guard off|on",
+    description: "Safety interlock: show rules, /guard test <cmd>, /guard judge [setup|off], /guard audit [export], /guard off|on",
     handler: async (args, ctx) => {
       const [sub, ...restWords] = (args || "").trim().split(/\s+/);
       const rest = (args || "").trim().slice(sub.length).trim();
       const { config, problems } = load(ctx.cwd);
       const say = (s: string, level: "info" | "warning" = "info") => ctx.ui.notify(s, level);
 
-      if (sub === "off") { on = false; return say("guard is OFF for this session: no rules, no judge. The last look at catastrophic commands still runs. /guard on turns it back on.", "warning"); }
-      if (sub === "on") { on = true; allowed.clear(); verdicts.clear(); return say("guard is ON. Session approvals and judge answers were cleared."); }
+      if (sub === "off") { on = false; audit?.write("change", { what: "guard off", by: "/guard off" }); return say("guard is OFF for this session: no rules, no judge. The last look at catastrophic commands still runs. /guard on turns it back on.", "warning"); }
+      if (sub === "on") { on = true; allowed.clear(); verdicts.clear(); audit?.write("change", { what: "guard on", by: "/guard on" }); return say("guard is ON. Session approvals and judge answers were cleared."); }
       if (sub === "judge") return judgeCommand(restWords[0] || "", ctx);
+      if (sub === "audit") return auditCommand(restWords[0] || "", config, ctx);
       if ((sub === "test" || sub === "test-file") && restWords.length) {
         const [toolName, input] = sub === "test" ? ["bash", { command: rest }] : ["write", { path: rest }];
         const d = await resolve(config, decide(config, toolName, input, ctx.cwd), toolName, input, ctx.cwd);
@@ -752,6 +864,7 @@ export default function (pi: ExtensionAPI) {
         config.judge
           ? `  judge: ${config.judge.model} at ${config.judge.url}${config.judge.apiKey ? " (with key)" : ""}, from ${config.judge.from} · allow only at ${Math.round(config.judge.allowAt * 100)}%+ · if unreachable: ${config.judge.ifUnavailable} · strictest verdict: ${config.judge.maxVerdict}`
           : `  judge: not connected. /guard judge setup connects one`,
+        `  audit: ${audit ? audit.file : "starts with the session"} · kept ${config.keepDays} days · /guard audit`,
         ...(allowed.size ? [`  allowed this session: ${[...allowed].map((k) => k.split(":").pop()).join(", ")}`] : []),
         ...problems.map((p) => `  ! ${p}`),
         `Edit ${CONFIG} to change these. Try: /guard test git push · /guard judge`,

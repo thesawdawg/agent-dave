@@ -190,7 +190,7 @@ async function decisionModels(url, key) {
 }
 
 // Ollama loads models with 4096 tokens of context unless the model sets num_ctx, and /v1/systemone
-// ignores num_ctx in the request. Keep in step with MIN_JUDGE_CTX in .pi/extensions/guard.ts.
+// ignores num_ctx in the request. Keep in step with MIN_JUDGE_CTX in .pi/extensions/guard/index.ts.
 const MIN_JUDGE_CTX = 16384;
 
 /**
