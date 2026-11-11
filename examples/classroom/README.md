@@ -11,6 +11,15 @@ A classroom file lets a teacher shape what DAVE may do in a class. It has base r
 3. `/guard lesson 1-explore` switches lessons. DAVE now has only read, grep, find and ls.
 4. `/guard test pip install requests` shows how both layers decide it, with the teacher's note.
 
+## Sharing it with a class
+
+Host the file at a public `https://` address (a GitHub repo's *Raw* link works) and have students set `"classroom": "https://…/your-class.jsonc"`. Then:
+
+- **It's downloaded when a session starts**, not during tool calls, with a 5-second limit. Edit the file and students get the new version in their next session, or right away with `/guard refresh`.
+- **A copy is saved** in `~/.pi/agent/guard-classroom/`. If the network is down, the server errors, or a new version has a mistake, the guard uses the saved copy and says so. With no saved copy yet, it asks before every change.
+- **Only `https://`** is accepted, plus `http://localhost` so you can preview a file from your own computer (`python3 -m http.server` in its folder).
+- Bump `"version"` when you change the file. The audit file records the version, its fingerprint, and whether the copy was fresh or saved, so you can see which rules a student had.
+
 ## How it decides
 
 The student's own rules and the teacher's file each decide every tool call, and the **stricter** answer wins: allow < ask < never. A student can make a lesson stricter, but not looser:

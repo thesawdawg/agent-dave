@@ -127,7 +127,7 @@
     },
     "classroom": {
       "type": "string",
-      "markdownDescription": "Path to a teacher's classroom file, relative to this folder. Its rules apply on top of yours, and the stricter answer wins. `/guard lesson` switches between its lessons."
+      "markdownDescription": "A teacher's classroom file: a path relative to this folder, or a URL (`https://`, or `http://localhost` for previewing). A URL is downloaded at session start and saved for when the network is down; `/guard refresh` downloads it again. Its rules apply on top of yours, and the stricter answer wins. `/guard lesson` switches between its lessons."
     },
     "outsideThisFolder": {
       "$ref": "#/definitions/mode",

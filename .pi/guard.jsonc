@@ -23,7 +23,8 @@
   "dial": "ask-before-anything-leaves",
 
   // A teacher's classroom file (optional): its rules apply on top of these, and the stricter
-  // answer wins. /guard lesson switches between its lessons. Delete the // to try the sample:
+  // answer wins. /guard lesson switches between its lessons. A path, or an https:// URL the guard
+  // downloads at session start (/guard refresh downloads it again). Delete the // to try the sample:
   // "classroom": "examples/classroom/intro-to-computing.jsonc",
 
   // A "never" rule always wins. Otherwise rules are checked top to bottom and the FIRST match decides.
