@@ -135,6 +135,8 @@ Setup is safe to run again. On a shared machine, remove your key when you're don
 
 Also in `docs/`:
 
+- **[master-dave-candidates.md](docs/master-dave-candidates.md):** proposed coding-agent extensions, MCP servers, skills, and custom builds for review; includes [intent questions](docs/master-dave-questions.md). No additions have been installed.
+- **[master-dave-update.md](docs/master-dave-update.md):** proposed `/dave-update` review, verification, and source-PR workflow.
 - **[skill-designer.md](docs/skill-designer.md):** a 20-minute fill-in guide for writing your first skill.
 - **[resources.md](docs/resources.md):** pi's docs, the Agent Skills spec, and K-State Library guides.
 - **[pi-cli-reference.md](docs/pi-cli-reference.md):** every `pi` command and option.
