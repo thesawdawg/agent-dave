@@ -17,3 +17,7 @@ Thumbs.db
 
 # Offline copy: vendored pi packages
 vendor/
+
+# Local DAVE worktrees and tool installs
+.dave/worktrees/
+.dave/tools/

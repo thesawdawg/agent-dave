@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "pi": "1.5.1",
+  "mcpTransport": "native",
+  "hub": null,
+  "note": "Set hub to an explicitly reviewed compatible version before setup --hub. No adapter packages."
+}

@@ -11,7 +11,7 @@
 // which answers allow, ask or never with a probability for each. See "judge" in guard.jsonc.
 // The judge has its own connection, separate from the model DAVE chats with. Set it up in pi
 // with /guard judge setup (or ./setup.sh --judge); it's saved to ~/.pi/agent/guard-judge.json.
-import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -143,7 +143,7 @@ function validate(raw: any, problems: string[]): Omit<Config, "source"> {
     timeoutMs,
     // A cold call loads the model first, so it gets longer. Never shorter than timeoutMs.
     coldStartMs: Math.max(timeoutMs, Number(j.coldStartMs) > 0 ? Number(j.coldStartMs) : JUDGE_DEFAULTS.coldStartMs),
-    ifUnavailable: ifUnavailable === "check" ? "ask" : ifUnavailable,
+    ifUnavailable: ifUnavailable === "never" ? "never" : "ask",
     // The strictest answer the judge may give. "ask" turns its "never" into a question for you.
     maxVerdict: j.maxVerdict === "ask" ? "ask" : "never",
     // A "url" written straight into guard.jsonc wins over the saved connection (one project, one judge).
@@ -454,6 +454,8 @@ function setOtherCommands(file: string, value: Mode | undefined) {
 }
 
 export default function (pi: ExtensionAPI) {
+
+  // /guard off skips rules and the judge until /guard on or a new session; the last look still runs.
   let on = true;
   const allowed = new Set<string>(); // "Yes, for the rest of this session" answers
   const verdicts = new Map<string, { mode: Mode; detail: string }>(); // judge answers, per command, this session
@@ -525,6 +527,7 @@ export default function (pi: ExtensionAPI) {
     const dial = (mode: Mode, why: string): Decision => ({ mode, why, source: `dial "${config.dial}"`, key: `dial:${toolName}` });
     if (config.dial === "ask-before-everything" && toolName !== "codemode") return dial("ask", `use ${toolName}`);
     if (config.dial === "ask-before-changes" && !HARMLESS.has(toolName) && hints?.readOnlyHint !== true) return dial("ask", `use ${toolName}`);
+    if (!HARMLESS.has(toolName) && !WRITES.has(toolName) && !READS.has(toolName)) return dial("check", `use unknown tool ${toolName}`);
     return dial("allow", "do this");
   }
 
@@ -552,6 +555,9 @@ export default function (pi: ExtensionAPI) {
     SHELLS.has(toolName) ? String(input.command ?? "") : typeof input.path === "string" ? `${toolName} ${input.path}` : `${toolName} ${JSON.stringify(input)}`.slice(0, 300);
 
   pi.on("session_start", async (_event, ctx) => {
+    on = true;
+    allowed.clear();
+    verdicts.clear();
     const { config } = load(ctx.cwd, ctx);
     // Load the judge model now, so the first real check doesn't wait for it. It gets WARM_UP_MS, not
     // coldStartMs: cutting a load short makes Ollama throw it away, and the next call would start over.
@@ -617,10 +623,11 @@ export default function (pi: ExtensionAPI) {
     const { config } = load(ctx.cwd, ctx);
     const input = (event.input ?? {}) as Record<string, unknown>;
     const d = await resolve(config, decide(config, event.toolName, input, ctx.cwd), event.toolName, input, ctx.cwd);
+    const approvalKey = JSON.stringify([ctx.cwd, event.toolName, input]);
     let mode = d.mode;
-    if (mode === "ask" && config.dial === "just-do-it") mode = "allow";
-    if (mode === "ask" && allowed.has(d.key)) mode = "allow";
-    if (mode === "ask" && !ctx.hasUI) mode = config.noOneToAsk;
+    // DAVE never turns an approval requirement into implicit permission.
+    if (mode === "ask" && allowed.has(approvalKey)) mode = "allow";
+    if (mode === "ask" && !ctx.hasUI) mode = "never";
     if (mode === "allow") return undefined;
     if (mode === "never") {
       return { block: true, reason: `guard: DAVE may not ${d.why} (${d.source}). Don't try another way; tell the user what you wanted to do so they can decide.` };
@@ -636,7 +643,7 @@ export default function (pi: ExtensionAPI) {
       if (saved === "never") return { block: true, reason: `guard: the user blocked this for good. Don't try another way; ask the user what to do instead.` };
       // cancelled: fall through to a plain "No"
     }
-    if (choice === "Yes, for the rest of this session") allowed.add(d.key);
+    if (choice === "Yes, for the rest of this session") allowed.add(approvalKey);
     if (choice?.startsWith("Yes")) return undefined;
     return { block: true, reason: `guard: you said no to "${d.why}". Don't try another way; ask the user what to do instead.` };
   }
@@ -734,8 +741,16 @@ export default function (pi: ExtensionAPI) {
       const { config, problems } = load(ctx.cwd);
       const say = (s: string, level: "info" | "warning" = "info") => ctx.ui.notify(s, level);
 
-      if (sub === "off") { on = false; return say("guard is OFF for this session: no rules, no judge. The last look at catastrophic commands still runs. /guard on turns it back on.", "warning"); }
-      if (sub === "on") { on = true; allowed.clear(); verdicts.clear(); return say("guard is ON. Session approvals and judge answers were cleared."); }
+      if (sub === "off") {
+        on = false;
+        return say(`guard is OFF for this session: rules in ${config.source} and the judge are skipped. The last look for catastrophic commands still runs. /guard on turns it back on.`, "warning");
+      }
+      if (sub === "on") {
+        on = true;
+        allowed.clear();
+        verdicts.clear();
+        return say(`guard is ON. Rules from ${config.source} apply again; session approvals and judge answers were cleared.`);
+      }
       if (sub === "judge") return judgeCommand(restWords[0] || "", ctx);
       if ((sub === "test" || sub === "test-file") && restWords.length) {
         const [toolName, input] = sub === "test" ? ["bash", { command: rest }] : ["write", { path: rest }];
@@ -743,7 +758,8 @@ export default function (pi: ExtensionAPI) {
         const mode = d.mode === "ask" && config.dial === "just-do-it" ? "allow (just-do-it)" : d.mode;
         const last = catastropheIn(toolName, input, ctx.cwd);
         return say(`${sub === "test" ? rest : "write " + rest}\n  → ${mode.toUpperCase()}: ${d.why}\n  decided by ${d.source}` +
-          (last && mode !== "never" ? `\n  → then the LAST LOOK stops it: it could ${last}. It runs only if you type RUN.` : ""));
+          (last && mode !== "never" ? `\n  → then the LAST LOOK stops it: it could ${last}. It runs only if you type RUN.` : "") +
+          (on ? "" : `\n  ! guard is OFF, so only the last look applies right now. /guard on turns the rules back on.`));
       }
       const lines = [
         `guard is ${on ? "ON" : "OFF"} · rules from ${config.source} · dial: ${config.dial}`,

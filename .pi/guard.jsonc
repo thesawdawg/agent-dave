@@ -4,7 +4,7 @@
 // In pi:  /guard                  shows the rules as guard.ts understands them
 //         /guard test rm notes.md  shows which rule decides a command
 //         /guard test-file .env    shows which rule decides writing a file
-//         /guard off  /guard on    pauses or resumes the guard for this session
+//         /guard off  /guard on    pauses these rules for this session / turns them back on
 //
 // After all of this, one last look that no setting here turns off: a short, fixed list of
 // catastrophic commands (rm -rf ~, deleting C:\Windows, formatting a disk ...) stops again and
@@ -16,7 +16,7 @@
   //   "ask-before-everything"       ask before every tool call, even reading a file
   //   "ask-before-changes"          ask before commands, file edits and MCP tools that aren't read-only
   //   "ask-before-anything-leaves"  only the rules below (recommended)
-  //   "just-do-it"                  "ask" rules are skipped; "never" rules still block
+  //   "just-do-it"                  legacy dial; explicit approvals still apply
   "dial": "ask-before-anything-leaves",
 
   // A "never" rule always wins. Otherwise rules are checked top to bottom and the FIRST match decides.
@@ -37,6 +37,13 @@
   // Any of these can be a list: "command": ["rm", "rmdir"]
   // End every rule with a comma, even the last one.
   "rules": [
+    // Saved from a guard prompt on 2026-11-10
+    { "command": "cd /home/sawyer/Documents/agent-dave && cat .pi/settings.json; cat package.json 2>/dev/null; node --version; for f in .pi/extensions/*.ts .pi/lib/*.ts; do echo \"== $f\"; node --experimental-strip-types --check \"$f\" 2>&1 | tail -5; done; echo; for t in tests/*.mjs; do echo \"== $t\"; node --test \"$t\" 2>&1 | grep -E \"^# (pass|fail)|not ok|Error\" | head -10; done", "exact": true, "mode": "allow", "why": "run this exact command (allowed by you)" },
+    { "tool": ["dave_implement", "dave_publish_update"], "mode": "ask", "why": "create an isolated writer or publish a reviewed update PR" },
+    { "tool": "dave_review", "mode": "ask", "why": "run a read-only reviewer using the configured model provider" },
+    { "tool": "dave_task", "mode": "allow", "why": "maintain local task records" },
+    { "command": "git push", "mode": "never", "why": "push commits" },
+    { "command": ["git commit", "npm install", "npm ci", "pip install", "uv add", "uv sync", "pi install"], "mode": "ask", "why": "install dependencies or commit changes" },
     // Never, even if you'd say yes: these need a person at the keyboard.
     { "command": ["sudo", "doas", "su"], "mode": "never", "why": "run something as administrator" },
     { "command": "chmod 777", "mode": "never", "why": "open a file to everyone" },
@@ -47,7 +54,7 @@
 
     // Ask first: anything that deletes, publishes or sends.
     { "command": ["rm", "rmdir", "unlink", "shred", "find -delete", "Remove-Item", "git rm"], "mode": "ask", "why": "delete files" },
-    { "command": ["git push", "git reset --hard", "git clean"], "mode": "ask", "why": "publish or throw away work in git" },
+    { "command": ["git reset --hard", "git clean"], "mode": "ask", "why": "publish or throw away work in git" },
     { "command": ["curl -X*", "curl -d", "curl --data*", "curl -F", "curl --form", "curl -T", "curl --upload*", "wget --post*", "Invoke-RestMethod", "Invoke-WebRequest"], "mode": "ask", "why": "send data to a website" },
     { "command": ["scp", "rsync", "sftp", "ssh", "mail", "sendmail"], "mode": "ask", "why": "send files or mail" },
 
@@ -65,7 +72,7 @@
   // Shell commands no rule above matched. Leave it out to let the dial decide, or set
   // "check" to send them to the judge below. /guard judge setup offers to switch this on.
   // (Any setting here takes "check" too.)
-  // "otherCommands": "check",
+  "otherCommands": "check",
 
   // Changing a file outside the agent-dave folder.
   "outsideThisFolder": "ask",

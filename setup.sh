@@ -3,6 +3,7 @@
 #
 #   ./setup.sh               install pi, Node.js and uv, connect to the studio, then open VS Code
 #   ./setup.sh --forget-key  remove the saved studio key (run it on shared machines afterward)
+#   ./setup.sh --integrations  configure GitHub, Redmine and worker limits
 #   ./setup.sh --judge       connect the guard's judge, a separate decision model (advanced)
 #   ./setup.sh --forget-judge  remove the judge connection
 #
@@ -35,6 +36,14 @@ node_ok() {
 if [ "${1:-}" = "--forget-key" ]; then
   node_ok || fail "Node.js isn't installed, so there's no saved key to remove."
   exec node scripts/connect.mjs --forget-key
+fi
+if [ "${1:-}" = "--hub" ]; then
+  node_ok || fail "Run ./setup.sh first; Hub setup needs Node.js."
+  exec node scripts/setup-hub.mjs
+fi
+if [ "${1:-}" = "--integrations" ]; then
+  node_ok || fail "Run ./setup.sh first; integration setup needs Node.js."
+  exec node scripts/configure-dave.mjs
 fi
 case "${1:-}" in --judge|--forget-judge)
   node_ok || fail "Run ./setup.sh first; the judge setup needs its Node.js."
@@ -170,6 +179,10 @@ fi
 # ---------- 7. Connect to the studio ----------
 step "7. Connect to the studio"
 node scripts/connect.mjs
+
+# ---------- 8. Personal coding integrations ----------
+step "8. DAVE coding integrations"
+node scripts/configure-dave.mjs
 
 # ---------- Done ----------
 step "Done"

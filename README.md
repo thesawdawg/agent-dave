@@ -4,6 +4,11 @@
 
 Every part of DAVE is a plain file in this repo. Open the folder in VS Code and you can read, and change, all of him.
 
+## Coding DAVE
+
+The coding iteration adds `/dave` task tracking, a coding-task skill, and stricter
+Guard defaults, using built-in Pi MCP. See [implementation and remaining checks](docs/dave-implementation.md).
+
 ## The parts
 
 | Robot part | What it is | File |
@@ -35,8 +40,8 @@ To write your own, copy [templates/my-skill](templates/my-skill/SKILL.md) into `
 
 Each rule picks a **mode**: `allow` runs it, `ask` asks you first, `never` blocks it. A `never` rule always wins; otherwise rules are checked top to bottom and the first match decides. An `allow` command rule covers a command line only if every command in it is allowed, so `pip install x && rm -rf ~` isn't waved through by a rule for `pip install`. Out of the box:
 
-- **Never:** `sudo`, `chmod 777`, reading or changing `.env`, and writing to `.git/`, `.ssh/` or pi's saved keys in `~/.pi/agent/`.
-- **Ask first:** deleting files, `git push`, sending data to a website, `scp`/`ssh`/mail, changing files outside this folder, and MCP tools their server marks as destructive.
+- **Never:** `git push`, `sudo`, `chmod 777`, reading or changing `.env`, and writing to `.git/`, `.ssh/` or pi's saved keys in `~/.pi/agent/`.
+- **Ask first:** dependency installs, commits, deleting files, sending data to a website, `scp`/`ssh`/mail, changing files outside this folder, and MCP tools their server marks as destructive.
 
 A rule matches a shell **command** by its words (`"rm"`, `"git push"`), a **file** by name or path (`".env"`, `"notes/private"`), or a **tool** by name (`"export_ics"`):
 
@@ -48,7 +53,7 @@ The `"dial"` at the top of the file decides everything no rule matches, using th
 
 When the guard asks about a shell command, you can answer **Yes, once**, **Yes, for the rest of this session**, **No**, or save your answer: **Always allow** or **Always block** adds a rule at the top of `.pi/guard.jsonc`, for that exact command or for any command starting the same way (such as `pip install`). Each saved rule gets a dated comment, so you can find and delete it in VS Code.
 
-In pi, `/guard` lists the rules as the guard understands them, `/guard test rm notes.md` shows which rule decides a command, `/guard test-file .env` does the same for a file, and `/guard off` pauses the guard for the session. If the file has a mistake, the guard says which line and asks before every change until it's fixed.
+In pi, `/guard` lists the rules as the guard understands them, `/guard test rm notes.md` shows which rule decides a command, `/guard test-file .env` does the same for a file, `/guard off` pauses the rules and the judge for the rest of the session, and `/guard on` turns your existing rules back on (a new session also starts with the guard on). The catastrophic-command last look below keeps running even while the guard is off. If the file has a mistake, the guard says which line and asks before every change until it's fixed.
 
 #### Super-advanced: a model as the judge
 Rules catch what you expected. For everything else, the guard can ask a **decision model**: [Clef](https://ollama.com/library/clef:27b), Cloudflare's open (Apache 2.0) model, or any endpoint that speaks the System One API. It reads a command against your policy (a few plain sentences in `.pi/guard.jsonc`) and returns a probability for `allow`, `ask` and `never`.
@@ -66,7 +71,7 @@ Then `/guard judge` checks that it answers, `/guard test python3 -c "import os; 
 - **One project, one judge:** a `"url"` (plus `"model"`, `"apiKey"`) written into the `"judge"` block of `.pi/guard.jsonc` wins over the saved connection.
 
 #### The last look: catastrophic commands
-Rules, the judge and your own "yes" can all be wrong, especially about a command you don't recognize. So right before any command runs, however it was allowed (a rule, **Yes**, **Always allow**, the `just-do-it` dial, even `/guard off`), the guard checks it against a short, fixed list of commands that can wreck a computer: `rm -rf` on `/`, `~` or a system folder, deleting `C:\Windows` or all of `C:`, formatting or overwriting a disk (`format`, `diskpart`, `mkfs`, `dd of=/dev/…`), a fork bomb, `chmod -R` on `/`, deleting Windows restore points or system registry keys, `git push --force` to `main`, and writes into the operating system's own folders. A match stops with a plain explanation of what it would do and runs only if you type `RUN`. With nobody there to type it, it's blocked.
+Rules, the judge and your own "yes" can all be wrong, especially about a command you don't recognize. So right before any command runs, however it was allowed (a rule, **Yes**, **Always allow**, the `just-do-it` dial, even a permissive dial), the guard checks it against a short, fixed list of commands that can wreck a computer: `rm -rf` on `/`, `~` or a system folder, deleting `C:\Windows` or all of `C:`, formatting or overwriting a disk (`format`, `diskpart`, `mkfs`, `dd of=/dev/…`), a fork bomb, `chmod -R` on `/`, deleting Windows restore points or system registry keys, `git push --force` to `main`, and writes into the operating system's own folders. A match stops with a plain explanation of what it would do and runs only if you type `RUN`. With nobody there to type it, it's blocked.
 
 The list is at the top of the "last look" section in [guard.ts](.pi/extensions/guard.ts). It's a seat belt, not a complete list, and it errs on the side of stopping (even `echo rm -rf /` gets a second look). `/guard test rm -rf ~` shows it.
 
@@ -154,3 +159,14 @@ A special shoutout to **Raymond Deiser** ([@rdeiser](https://github.com/rdeiser)
 ---
 
 Workshop by Sawyer Borror · sawyerb@ksu.edu
+
+Configure coding integrations with `./setup.sh --integrations` (also included in
+normal setup). It asks for GitHub and Redmine settings and writes personal native
+Pi MCP configuration without saving tokens. See the
+[setup variables and current limitations](docs/dave-implementation.md#personal-integration-setup).
+
+DAVE also provides `dave_review`, `dave_implement` (isolated Git worktrees), and
+`dave_publish_update` (approved draft PRs via GitHub API). Hub installation is
+opt-in with `DAVE_HUB_VERSION=<reviewed-version> ./setup.sh --hub`. See the
+[completion notes](docs/dave-implementation.md#completion-pass--user-testing-deferred)
+for scope and user-testing requirements. These latest additions are untested.

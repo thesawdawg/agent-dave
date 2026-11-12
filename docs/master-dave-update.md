@@ -41,3 +41,14 @@ Ordinary installs, commits, and external updates outside this command retain the
 - [Pi extension API](https://pi.dev/docs/latest/extensions) for command registration and session behavior.
 - [GitHub MCP Server source](https://github.com/github/github-mcp-server) for repository/PR integration; choose the exact required API capabilities during implementation.
 - Existing [Guard/Judge](../.pi/extensions/guard.ts) and [rules](../.pi/guard.jsonc), plus the proposed C1 verification and C9 updater in the [candidate catalog](master-dave-candidates.md).
+
+## Implementation update
+
+The `/dave-update` prompt now coordinates review and the `dave_publish_update`
+API tool. Scope is `.pi/baseline.json` and campus-events' package manifest/lock.
+The tool creates content-addressed update branches and draft PRs, reuses matching
+open PRs, detects no-change trees, and never updates an existing branch with a
+different tree. It reads repository/base from setup and uses `DAVE_GITHUB_TOKEN`.
+Publication still requires Guard approval and supplied user verification evidence.
+No automatic installation, merge or live activation occurs. Latest additions
+are untested at the user's request; this supersedes the initial unimplemented status.
