@@ -13,6 +13,7 @@
 // with /guard judge setup (or ./setup.sh --judge); it's saved to ~/.pi/agent/guard-judge.json.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { patternMatches, recommendPatterns, validPattern, type GuardPattern } from "../lib/guard-pattern.ts";
 import os from "node:os";
 import path from "node:path";
 
@@ -21,11 +22,12 @@ type JudgeLink = { url: string; model: string; apiKey: string; from: string };
 type JudgeRules = { policy: string[]; allowAt: number; timeoutMs: number; coldStartMs: number; ifUnavailable: Mode; maxVerdict: "ask" | "never"; override?: JudgeLink };
 type Judge = JudgeLink & JudgeRules;
 type Dial = "ask-before-everything" | "ask-before-changes" | "ask-before-anything-leaves" | "just-do-it";
-type Rule = { command?: string[]; exact?: boolean; file?: string[]; tool?: string[]; access: "write" | "read" | "any"; mode: Mode; why: string; n: number };
+type Rule = { pattern?: GuardPattern; command?: string[]; exact?: boolean; file?: string[]; tool?: string[]; access: "write" | "read" | "any"; mode: Mode; why: string; n: number };
 type Config = { dial: Dial; rules: Rule[]; otherCommands?: Mode; outsideThisFolder: Mode; destructiveTools: Mode; noOneToAsk: "allow" | "never"; judgeRules: JudgeRules; judge?: Judge; source: string };
 type Decision = { mode: Mode; why: string; source: string; key: string; capped?: boolean };
 
 const CONFIG = ".pi/guard.jsonc";
+const APPROVAL_CANCEL_HINT = "Esc closes this approval and blocks the pending call; it does not go back. No new rule is saved.";
 // The judge's connection lives outside the repo, next to pi's own models.json, so a key never lands in git.
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
 const JUDGE_FILE = path.join(AGENT_DIR, "guard-judge.json");
@@ -117,8 +119,9 @@ function validate(raw: any, problems: string[]): Omit<Config, "source"> {
   (Array.isArray(raw.rules) ? raw.rules : []).forEach((r: any, i: number) => {
     const n = i + 1;
     const command = list(r?.command), file = list(r?.file), tool = list(r?.tool);
-    const kinds = [command, file, tool].filter(Boolean).length;
-    if (kinds !== 1) return problems.push(`rule ${n}: needs exactly one of "command", "file" or "tool"; skipped`);
+    const pattern = validPattern(r?.pattern) ? r.pattern : undefined;
+    const kinds = [command, file, tool, pattern].filter(Boolean).length;
+    if (kinds !== 1) return problems.push(`rule ${n}: needs exactly one of "command", "file", "tool" or "pattern"; skipped`);
     let ruleMode = r.mode as Mode;
     if (!MODES.includes(String(r.mode))) {
       problems.push(`rule ${n}: "mode" should be allow, ask, never or check, not "${r.mode ?? ""}"; asking to be safe`);
@@ -126,8 +129,8 @@ function validate(raw: any, problems: string[]): Omit<Config, "source"> {
     }
     const access = ["write", "read", "any"].includes(r.access) ? r.access : "write";
     if (r.access !== undefined && access !== r.access) problems.push(`rule ${n}: "access" must be write, read or any; using write`);
-    const what = command ? `run ${command.join(" / ")}` : file ? `${access === "read" ? "read" : "change"} ${file.join(" / ")}` : `use ${tool!.join(" / ")}`;
-    rules.push({ command, exact: r.exact === true && !!command, file, tool, access, mode: ruleMode, why: String(r.why || what), n });
+    const what = pattern ? `use ${pattern.tool} matching ${pattern.glob}` : command ? `run ${command.join(" / ")}` : file ? `${access === "read" ? "read" : "change"} ${file.join(" / ")}` : `use ${tool!.join(" / ")}`;
+    rules.push({ pattern, command, exact: r.exact === true && !!command, file, tool, access, mode: ruleMode, why: String(r.why || what), n });
   });
   if (!Array.isArray(raw.rules)) problems.push(`"rules" should be a list in [ ... ]; no rules loaded`);
   const noOne = raw.noOneToAsk === "allow" ? "allow" : "never";
@@ -457,6 +460,7 @@ export default function (pi: ExtensionAPI) {
 
   // /guard off skips rules and the judge until /guard on or a new session; the last look still runs.
   let on = true;
+  const sessionPatterns: { cwd: string; rule: Rule }[] = [];
   const allowed = new Set<string>(); // "Yes, for the rest of this session" answers
   const verdicts = new Map<string, { mode: Mode; detail: string }>(); // judge answers, per command, this session
   let cache: { file: string; mtime: number; judgeMtime: number; config: Config; problems: string[]; told: boolean } | undefined;
@@ -493,7 +497,7 @@ export default function (pi: ExtensionAPI) {
 
   // Which rule or setting decides this tool call.
   function decide(config: Config, toolName: string, input: Record<string, unknown>, cwd: string): Decision {
-    const rule = (r: Rule): Decision => ({ mode: r.mode, why: r.why, source: `rule ${r.n} in ${config.source}`, key: `rule:${r.n}:${r.why}` });
+    const rule = (r: Rule): Decision => ({ mode: r.mode, why: r.why, source: r.n === 0 ? "session pattern" : `rule ${r.n} in ${config.source}`, key: `rule:${r.n}:${r.why}` });
     const target = typeof input.path === "string" ? path.resolve(cwd, input.path) : undefined;
     const command = SHELLS.has(toolName) ? String(input.command ?? "") : undefined;
     const commands = command !== undefined ? commandsIn(command) : [];
@@ -503,6 +507,7 @@ export default function (pi: ExtensionAPI) {
     const asPath = (w: string) => path.resolve(cwd, w.replace(/^~(?=[\\/]|$)/, os.homedir()));
 
     const matches = (r: Rule) => {
+      if (r.pattern) return patternMatches(r.pattern, toolName, input, cwd);
       if (r.command && command !== undefined && commandRuleMatches(r, command)) return true;
       if (r.file && command !== undefined && r.access !== "write" && pathWords.some((w) => r.file!.some((p) => fileMatches(p, asPath(w), cwd)))) return true;
       if (r.file && target) {
@@ -512,8 +517,9 @@ export default function (pi: ExtensionAPI) {
       return !!(r.tool && r.tool.some((p) => toolMatches(p, toolName)));
     };
     // "never" rules always win, wherever they sit. Otherwise the first rule that matches decides.
-    for (const r of config.rules) if (r.mode === "never" && matches(r)) return rule(r);
-    for (const r of config.rules) if (matches(r)) return rule(r);
+    const rules = [...sessionPatterns.filter(p => p.cwd === cwd).map(p => p.rule), ...config.rules];
+    for (const r of rules) if (r.mode === "never" && matches(r)) return rule(r);
+    for (const r of rules) if (matches(r)) return rule(r);
     if (command !== undefined && config.otherCommands) {
       return { mode: config.otherCommands, why: "run this command", source: `otherCommands in ${config.source}`, key: `cmd:${command}` };
     }
@@ -557,12 +563,61 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     on = true;
     allowed.clear();
+    sessionPatterns.length = 0;
     verdicts.clear();
     const { config } = load(ctx.cwd, ctx);
     // Load the judge model now, so the first real check doesn't wait for it. It gets WARM_UP_MS, not
     // coldStartMs: cutting a load short makes Ollama throw it away, and the next call would start over.
     if (config.judge) void askJudge(config.judge, { tool: "bash", command: "ls", folder: ctx.cwd }, WARM_UP_MS);
   });
+
+  /** Create a user-edited, tool-specific pattern after previewing its scope. */
+  async function promptPattern(ctx: any, tool: string, input: Record<string, unknown>, mode: "allow" | "never"): Promise<Mode | undefined> {
+    const initial = tool === "bash" ? String(input.command ?? "") : String(input.path ?? "");
+    const suggestions = recommendPatterns(tool, input, ctx.cwd);
+    const labels = suggestions.map(suggestion => `${suggestion.label}: ${suggestion.glob}`);
+    const selected = await ctx.ui.select(`Choose a starting pattern for ${tool}. You can edit it next.\n\n${APPROVAL_CANCEL_HINT}`, [
+      ...labels, "Edit the current command/path…", "Cancel",
+    ]);
+    if (!selected || selected === "Cancel") return undefined;
+    const index = labels.indexOf(selected);
+    const prefill = index >= 0 ? suggestions[index].glob : initial;
+    const glob = await ctx.ui.editor(`Edit the ${tool} pattern — * stays in one directory; ** includes subdirectories\n\n${APPROVAL_CANCEL_HINT}`, prefill);
+    if (!glob) return undefined;
+    const pattern = { tool, glob: glob.trim() };
+    if (!validPattern(pattern) || !patternMatches(pattern, tool, input, ctx.cwd)) {
+      ctx.ui.notify("Pattern must match this call. Shell patterns require a simple command, fixed program and flags, and the same number of arguments. Shell expansions and symlink paths are not covered.", "warning");
+      return undefined;
+    }
+    const scope = await ctx.ui.select(`Keep this pattern for how long?\n\n${APPROVAL_CANCEL_HINT}`, ["This session", "This project", "Cancel"]);
+    if (!scope || scope === "Cancel") return undefined;
+    const confirm = await ctx.ui.select(`${mode === "allow" ? "Allow" : "Deny"} ${tool} matching:\n  ${pattern.glob}\nFolder: ${ctx.cwd}\nScope: ${scope}\nOther tools are unaffected. Explicit deny rules still win.\n\n${APPROVAL_CANCEL_HINT}`, ["Save pattern", "Cancel"]);
+    if (confirm !== "Save pattern") return undefined;
+    const rule: Rule = { pattern, mode, access: "any", n: 0, why: `use ${tool} matching ${pattern.glob} (${scope.toLowerCase()} pattern)` };
+    if (scope === "This session") sessionPatterns.unshift({ cwd: ctx.cwd, rule });
+    else {
+      try {
+        const file = path.join(ctx.cwd, CONFIG);
+        const text = readFileSync(file, "utf8");
+        const problems: string[] = [];
+        validate(parseJsonc(text), problems);
+        if (problems.length) throw new Error("Fix the existing configuration errors first.");
+        const at = /^([ \t]*)"rules"[ \t]*:[ \t]*\[/m.exec(text);
+        if (!at) throw new Error('Cannot find the rules array.');
+        const saved = JSON.stringify({ pattern, mode, why: rule.why });
+        const after = text.slice(at.index + at[0].length);
+        const hasRules = (parseJsonc(text) as { rules: unknown[] }).rules.length > 0;
+        writeFileSync(file, text.slice(0, at.index + at[0].length) + `\n${at[1]}  ${saved}${hasRules ? "," : ""}\n` + after);
+        cache = undefined;
+      } catch (error) {
+        ctx.ui.notify(`guard: pattern was not saved: ${String(error)}`, "warning");
+        return undefined;
+      }
+    }
+    verdicts.clear();
+    ctx.ui.notify(`guard: saved ${scope.toLowerCase()} ${mode} pattern for ${tool}.`, "info");
+    return mode;
+  }
 
   // "Always allow" / "Always block": save a rule at the top of guard.jsonc, so the answer sticks.
   async function saveRuleFromPrompt(ctx: any, command: string, mode: "allow" | "never", d: Decision): Promise<Mode | undefined> {
@@ -579,7 +634,7 @@ export default function (pi: ExtensionAPI) {
     if (prefix && prefix !== line) scopes.push(`Any command starting "${prefix}"${overrides}`);
     scopes.push("Cancel");
     const verb = mode === "allow" ? "Always allow" : "Always block";
-    const scope = await ctx.ui.select(`${verb}: which commands should the new rule cover?\n\n  ${line.slice(0, 200)}`, scopes);
+    const scope = await ctx.ui.select(`${verb}: which commands should the new rule cover?\n\n  ${line.slice(0, 200)}\n\n${APPROVAL_CANCEL_HINT}`, scopes);
     if (!scope || scope === "Cancel") return undefined;
     const exact = scope.startsWith("Only");
     const by = mode === "allow" ? "allowed by you" : "blocked by you";
@@ -610,11 +665,11 @@ export default function (pi: ExtensionAPI) {
     const reason = `guard: this would ${what}. It's on the guard's catastrophic list, so it doesn't run without the user typing RUN. Don't try another way; explain to the user what you were trying to do.`;
     if (!ctx.hasUI) return { block: true, reason };
     const choice = await ctx.ui.select(
-      `guard · STOP. This could ${what}.\n\n  ${describe(event.toolName, input)}\n\nIt was allowed, but it's on the guard's list of catastrophic commands. Are you sure?`,
+      `guard · STOP. This could ${what}.\n\n  ${describe(event.toolName, input)}\n\nIt was allowed, but it's on the guard's list of catastrophic commands. Are you sure?\n\nEsc closes this approval and blocks the pending call; it does not go back.`,
       ["No, block it", "I understand the risk, let me confirm"],
     );
     if (choice !== "I understand the risk, let me confirm") return { block: true, reason };
-    const typed = await ctx.ui.input("Type RUN to run it. Anything else blocks it.", "");
+    const typed = await ctx.ui.input("Type RUN to run it. Anything else, including Esc, closes this approval and blocks the call; it does not go back.", "");
     if ((typed || "").trim() !== "RUN") return { block: true, reason };
     return undefined;
   }
@@ -636,7 +691,15 @@ export default function (pi: ExtensionAPI) {
     const choices = ["Yes, once", "Yes, for the rest of this session", "No"];
     // A call the judge flagged as dangerous can be allowed once or for the session, but not saved as "always".
     if (isShell) choices.push(...(d.capped ? [ALWAYS_BLOCK] : [ALWAYS_ALLOW, ALWAYS_BLOCK]));
-    const choice = await ctx.ui.select(`guard · DAVE wants to ${d.why}:\n\n  ${describe(event.toolName, input)}\n\n  (${d.source})\n\nAllow it?`, choices);
+    if (event.toolName === "bash" || ["read", "edit", "write"].includes(event.toolName)) {
+      choices.push(...(d.capped ? ["Deny a pattern…"] : ["Allow a pattern…", "Deny a pattern…"]));
+    }
+    const choice = await ctx.ui.select(`guard · DAVE wants to ${d.why}:\n\n  ${describe(event.toolName, input)}\n\n  (${d.source})\n\nAllow it?\n\n${APPROVAL_CANCEL_HINT}`, choices);
+    if (choice === "Allow a pattern…" || choice === "Deny a pattern…") {
+      const saved = await promptPattern(ctx, event.toolName, input, choice === "Allow a pattern…" ? "allow" : "never");
+      if (saved === "allow") return undefined;
+      return { block: true, reason: saved === "never" ? "guard: the user denied this pattern. Ask the user what to do instead." : "guard: no pattern was saved; this call was not approved." };
+    }
     if (choice === ALWAYS_ALLOW || choice === ALWAYS_BLOCK) {
       const saved = await saveRuleFromPrompt(ctx, String(input.command ?? ""), choice === ALWAYS_ALLOW ? "allow" : "never", d);
       if (saved === "allow") return undefined;
@@ -734,13 +797,17 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("guard", {
-    description: "Safety interlock: show rules, /guard test <cmd>, /guard judge [setup|off], /guard off|on",
+    description: "Safety interlock: show rules, /guard clear-patterns, /guard test <cmd>, /guard judge [setup|off], /guard off|on",
     handler: async (args, ctx) => {
       const [sub, ...restWords] = (args || "").trim().split(/\s+/);
       const rest = (args || "").trim().slice(sub.length).trim();
       const { config, problems } = load(ctx.cwd);
       const say = (s: string, level: "info" | "warning" = "info") => ctx.ui.notify(s, level);
 
+      if (sub === "clear-patterns") {
+        sessionPatterns.length = 0;
+        return say("guard: session patterns cleared. Project patterns remain in .pi/guard.jsonc.");
+      }
       if (sub === "off") {
         on = false;
         return say(`guard is OFF for this session: rules in ${config.source} and the judge are skipped. The last look for catastrophic commands still runs. /guard on turns it back on.`, "warning");
@@ -748,6 +815,7 @@ export default function (pi: ExtensionAPI) {
       if (sub === "on") {
         on = true;
         allowed.clear();
+        sessionPatterns.length = 0;
         verdicts.clear();
         return say(`guard is ON. Rules from ${config.source} apply again; session approvals and judge answers were cleared.`);
       }
@@ -763,14 +831,15 @@ export default function (pi: ExtensionAPI) {
       }
       const lines = [
         `guard is ${on ? "ON" : "OFF"} · rules from ${config.source} · dial: ${config.dial}`,
-        ...config.rules.map((r) => `  ${String(r.n).padStart(2)}. ${r.mode.padEnd(6)} ${r.command ? (r.exact ? "exact command" : "command") : r.file ? `file (${r.access})` : "tool"}: ${(r.command || r.file || r.tool)!.join(", ")}  · ${r.why}`),
+        ...config.rules.map((r) => `  ${String(r.n).padStart(2)}. ${r.mode.padEnd(6)} ${r.command ? (r.exact ? "exact command" : "command") : r.file ? `file (${r.access})` : r.pattern ? "pattern" : "tool"}: ${(r.pattern ? [`${r.pattern.tool} ${r.pattern.glob}`] : (r.command || r.file || r.tool)!).join(", ")}  · ${r.why}`),
         `  other commands: ${config.otherCommands ?? "the dial decides"} · outside this folder: ${config.outsideThisFolder} · destructive MCP tools: ${config.destructiveTools} · nobody to ask: ${config.noOneToAsk}`,
         config.judge
           ? `  judge: ${config.judge.model} at ${config.judge.url}${config.judge.apiKey ? " (with key)" : ""}, from ${config.judge.from} · allow only at ${Math.round(config.judge.allowAt * 100)}%+ · if unreachable: ${config.judge.ifUnavailable} · strictest verdict: ${config.judge.maxVerdict}`
           : `  judge: not connected. /guard judge setup connects one`,
         ...(allowed.size ? [`  allowed this session: ${[...allowed].map((k) => k.split(":").pop()).join(", ")}`] : []),
+        ...sessionPatterns.filter(p => p.cwd === ctx.cwd).map(p => `  session ${p.rule.mode}: ${p.rule.pattern!.tool} ${p.rule.pattern!.glob}`),
         ...problems.map((p) => `  ! ${p}`),
-        `Edit ${CONFIG} to change these. Try: /guard test git push · /guard judge`,
+        `Edit ${CONFIG} to change project patterns; /guard clear-patterns clears session patterns. Try: /guard test git push · /guard judge`,
       ];
       say(lines.join("\n"), problems.length ? "warning" : "info");
     },

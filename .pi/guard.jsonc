@@ -34,7 +34,9 @@
   //   "file": "notes/private"    a path is relative to this folder; ~/ is your home folder
   //   "access": "read"           file rules cover writing by default; "read" or "any" for reading too
   //   "tool": "export_ics"       a tool by name (MCP tools too); * works here as well
-  // Any of these can be a list: "command": ["rm", "rmdir"]
+  // "pattern": { "tool": "read", "glob": "docs/**" } scopes a glob to exactly one tool.
+  // Approval prompts can save these for this session or this project.
+  // Any of command/file/tool can be a list: "command": ["rm", "rmdir"]
   // End every rule with a comma, even the last one.
   "rules": [
     // Saved from a guard prompt on 2026-11-10

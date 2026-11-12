@@ -170,3 +170,34 @@ DAVE also provides `dave_review`, `dave_implement` (isolated Git worktrees), and
 opt-in with `DAVE_HUB_VERSION=<reviewed-version> ./setup.sh --hub`. See the
 [completion notes](docs/dave-implementation.md#completion-pass--user-testing-deferred)
 for scope and user-testing requirements. These latest additions are untested.
+
+### Guard pattern approvals
+
+When Guard asks, choose **Allow a pattern…** or **Deny a pattern…** for Bash,
+read, edit, or write. Guard suggests patterns based on the pending file:
+for `cat docs/guide.md`, choose `cat docs/*.md` (recommended), `cat docs/*`,
+or the broader `cat docs/**/*`. The selected suggestion opens in an editor,
+so you can change any part of the path before saving. You can also start with
+the exact current command/path. Shell suggestions preserve the program and
+other arguments, and only infer file operands for familiar file-reading commands;
+ambiguous commands and directory operands use the custom editor instead.
+Choose **This session** (first choice) or **This project**, then confirm the
+preview. Each pattern applies only to its selected tool and working folder.
+Read, edit, write, and Bash permissions are independent.
+
+`*` matches within one directory; `**` includes subdirectories; `?` matches one
+character within a directory. Shell patterns require the same program, flags,
+and argument count. Compound commands, shell expansions, and symlink paths
+retain normal approval handling. Existing explicit deny rules take precedence.
+Patterns must match the pending call before they can be saved; canceling blocks
+that call. Every approval step explains that Esc closes the entire approval flow
+and blocks the pending call; it does not return to the previous question, and
+no new rule is saved. Judge-flagged dangerous calls retain the existing restriction against
+saving reusable allow rules.
+
+Use `/guard` to view patterns and `/guard clear-patterns` to clear session
+patterns. Session patterns also clear on session start and `/guard on`.
+Project patterns live in `.pi/guard.jsonc`, where they can be edited or removed.
+PowerShell and other tools retain their existing approval flow.
+
+Pattern approval changes have not been tested; user testing is deferred as requested.

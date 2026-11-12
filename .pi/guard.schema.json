@@ -80,6 +80,11 @@
             "required": [
               "tool"
             ]
+          },
+          {
+            "required": [
+              "pattern"
+            ]
           }
         ],
         "properties": {
@@ -114,6 +119,30 @@
           "exact": {
             "type": "boolean",
             "markdownDescription": "For `command` rules: the whole command line must be exactly this text (spaces squeezed). \"Always allow\" in the guard's question saves rules like this."
+          },
+          "pattern": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "tool",
+              "glob"
+            ],
+            "properties": {
+              "tool": {
+                "enum": [
+                  "bash",
+                  "read",
+                  "edit",
+                  "write"
+                ]
+              },
+              "glob": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000
+              }
+            },
+            "description": "Tool-specific pattern from an approval prompt. * and ? stay within a path segment; ** crosses directories. Bash patterns match simple commands with fixed program, flags and argument count."
           }
         }
       }
