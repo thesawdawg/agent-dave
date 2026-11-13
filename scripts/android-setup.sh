@@ -17,9 +17,9 @@
 # With --provider custom, ENDPOINT_NAME, ENDPOINT_URL, ENDPOINT_API_KEY and ENDPOINT_MODEL in the
 # environment answer its questions (see scripts/connect.mjs).
 #
-# Safe to run again, also to switch provider. Start and stop with scripts/dave-android.sh. The
-# Android folder DAVE may reach is deliberately not set here: you set it inside pi with
-# /dave:android mount <folder>.
+# Safe to run again, also to switch provider: the previous run's answers are the defaults, so Enter
+# keeps them and a flag still wins. Start and stop with scripts/dave-android.sh. The Android folder
+# DAVE may reach is deliberately not set here: you set it inside pi with /dave:android mount <folder>.
 set -euo pipefail
 
 DAVE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,7 +28,17 @@ PI_INSTALL_URL="${PI_INSTALL_URL:-https://pi.dev/install.sh}"
 PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 # The managed pi's launcher lives here; first on PATH so this run (and the installer) use it.
 export PATH="$PI_AGENT_DIR/bin:$PATH"
-PROVIDER=""; MODEL_OVERRIDE=""; CTX_OVERRIDE=""; THREADS_OVERRIDE=""; PORT=8080; LOCAL_FLAGS=0; UPDATE_PI=0
+
+# One field of the model choice a previous run saved, or empty. hardware.json exists only after a
+# run that also installed node, so its absence (or node's) just means there are no defaults.
+hw() { node -e 'try { const v = require(process.argv[1])[process.argv[2]]; process.stdout.write(v == null ? "" : String(v)); } catch {}' "$STATE/hardware.json" "$1" 2>/dev/null; }
+OLD_PROVIDER=""; OLD_MODEL=""; OLD_CTX=""; OLD_THREADS=""; OLD_PORT=""; OLD_MODEL_ID=""
+if command -v node >/dev/null && [ -f "$STATE/hardware.json" ]; then
+  OLD_PROVIDER=$(hw provider); OLD_PORT=$(hw port); OLD_MODEL_ID=$(hw modelId)
+  # The local settings only mean something when the phone already runs its own model.
+  if [ "$OLD_PROVIDER" = dave-local ]; then OLD_MODEL=$(hw model); OLD_CTX=$(hw ctx); OLD_THREADS=$(hw threads); fi
+fi
+PROVIDER=""; MODEL_OVERRIDE=""; CTX_OVERRIDE=""; THREADS_OVERRIDE=""; PORT=${OLD_PORT:-8080}; LOCAL_FLAGS=0; UPDATE_PI=0
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
@@ -58,18 +68,31 @@ case "$PROVIDER" in ""|local|custom) ;; *) fail "--provider must be local or cus
 [[ "${PREFIX:-}" == *com.termux* ]] || fail "run this inside Termux on Android"
 ok "Termux on $(getprop ro.product.manufacturer), Android $(getprop ro.build.version.release)"
 
-# ---------- 2. Which model DAVE uses (required; Enter means local) ----------
+# ---------- 2. Which model DAVE uses (required; Enter keeps the last choice) ----------
 if [ -z "$PROVIDER" ]; then
-  [ -t 0 ] || fail "no terminal to ask which model DAVE uses: add --provider local or --provider custom"
-  printf '\nWhich model should DAVE use?\n'
-  printf '  1) Local: llama.cpp on this phone (no network after the first download)  [default]\n'
-  printf '  2) Another OpenAI-compatible endpoint (name, address, API key)\n'
-  read -r -p "Pick [1]: " pick
-  case "${pick:-1}" in
-    1|local)  PROVIDER=local ;;
-    2|custom) PROVIDER=custom ;;
-    *) fail "pick 1 or 2, got: $pick" ;;
-  esac
+  if [ -t 0 ]; then
+    printf '\nWhich model should DAVE use?\n'
+    if [ -n "$OLD_PROVIDER" ] && [ "$OLD_PROVIDER" != dave-local ]; then
+      printf '  1) Local: llama.cpp on this phone (no network after the first download)\n'
+      printf '  2) Another OpenAI-compatible endpoint (currently %s)  [default]\n' "$OLD_PROVIDER"
+      pick=2
+    else
+      printf '  1) Local: llama.cpp on this phone (no network after the first download)  [default]\n'
+      printf '  2) Another OpenAI-compatible endpoint (name, address, API key)\n'
+      pick=1
+    fi
+    read -r -p "Pick [$pick]: " answer
+    case "${answer:-$pick}" in
+      1|local)  PROVIDER=local ;;
+      2|custom) PROVIDER=custom ;;
+      *) fail "pick 1 or 2, got: $answer" ;;
+    esac
+  elif [ -n "$OLD_PROVIDER" ]; then
+    # No terminal to ask with: keep the provider a previous run saved.
+    if [ "$OLD_PROVIDER" = dave-local ]; then PROVIDER=local; else PROVIDER=custom; fi
+  else
+    fail "no terminal to ask which model DAVE uses: add --provider local or --provider custom"
+  fi
 fi
 [ "$PROVIDER" = local ] || [ "$LOCAL_FLAGS" -eq 0 ] || warn "--model, --ctx, --threads and --port only apply to --provider local; ignoring them"
 ok "provider: $PROVIDER"
@@ -140,7 +163,8 @@ if [ "$PROVIDER" = local ]; then
     [ -r "$f" ] && [ "$(cat "$f")" -ge $(( ${MAXF:-0} * 7 / 10 )) ] && BIG=$((BIG + 1))
   done
   [ "$BIG" -gt 0 ] || BIG=$(nproc)
-  THREADS=${THREADS_OVERRIDE:-$BIG}
+  # A flag wins over the last run's answer, which wins over the guess from this phone's hardware.
+  THREADS=${THREADS_OVERRIDE:-${OLD_THREADS:-$BIG}}
   FREE_GB=$(df -Pk "$HOME" | awk 'NR == 2 {print int($4 / 1048576)}')
 
   # MemTotal reads below the advertised RAM (an "8GB" phone shows about 7.4GB), so the cutoffs sit lower.
@@ -149,8 +173,8 @@ if [ "$PROVIDER" = local ]; then
   elif [ "$RAM_MB" -ge 3500 ];  then MODEL="LiquidAI/LFM2.5-1.2B-Instruct-GGUF:Q4_0";    CTX=16384
   else                               MODEL="LiquidAI/LFM2.5-350M-GGUF:Q4_0";             CTX=8192
   fi
-  MODEL=${MODEL_OVERRIDE:-$MODEL}
-  CTX=${CTX_OVERRIDE:-$CTX}
+  MODEL=${MODEL_OVERRIDE:-${OLD_MODEL:-$MODEL}}
+  CTX=${CTX_OVERRIDE:-${OLD_CTX:-$CTX}}
   MODEL_ID=$(basename "${MODEL%%:*}" | sed 's/-GGUF$//')
   [ "$FREE_GB" -ge 8 ] || warn "under 8GB free; the model download may fail"
   write_model dave-local "$MODEL_ID" "$MODEL" "$CTX" "$THREADS" "$PORT" ""
@@ -158,7 +182,23 @@ if [ "$PROVIDER" = local ]; then
 else
   printf '\n'
   RESULT="$STATE/endpoint.json"
-  node "$DAVE_DIR/scripts/connect.mjs" --custom --result "$RESULT"
+  CURRENT=()
+  if [ -n "$OLD_PROVIDER" ] && [ "$OLD_PROVIDER" != dave-local ]; then
+    # The saved endpoint's name, address, key and model become the questions' defaults.
+    CURRENT=(--current "$OLD_PROVIDER" --current-model "$OLD_MODEL_ID")
+    if [ ! -t 0 ]; then
+      # No terminal to ask with: answer from the saved provider in pi's models.json instead.
+      saved() { node -e 'try { const v = (require(process.argv[1]).providers || {})[process.argv[2]]?.[process.argv[3]]; process.stdout.write(v == null ? "" : String(v)); } catch {}' "$PI_AGENT_DIR/models.json" "$OLD_PROVIDER" "$1"; }
+      ENDPOINT_NAME=${ENDPOINT_NAME:-$(saved name)}
+      ENDPOINT_URL=${ENDPOINT_URL:-$(saved baseUrl)}
+      ENDPOINT_API_KEY=${ENDPOINT_API_KEY:-$(saved apiKey)}
+      [ "$ENDPOINT_API_KEY" != none ] || ENDPOINT_API_KEY=""
+      ENDPOINT_MODEL=${ENDPOINT_MODEL:-$OLD_MODEL_ID}
+      export ENDPOINT_NAME ENDPOINT_URL ENDPOINT_API_KEY ENDPOINT_MODEL
+      [ -n "$ENDPOINT_URL" ] || fail "no saved endpoint for $OLD_PROVIDER; run setup in a terminal to enter one"
+    fi
+  fi
+  node "$DAVE_DIR/scripts/connect.mjs" --custom "${CURRENT[@]}" --result "$RESULT"
   read_result() { node -e 'const r = require(process.argv[1]); const v = r[process.argv[2]]; process.stdout.write(v == null ? "" : String(v));' "$RESULT" "$1"; }
   ENDPOINT=$(read_result provider); MODEL_ID=$(read_result model); CTX=$(read_result contextWindow); BASE_URL=$(read_result baseUrl)
   CTX=${CTX:-32768}

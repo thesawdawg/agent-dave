@@ -6,6 +6,7 @@
 //   node scripts/connect.mjs --judge       connect the guard's judge: a separate decision model
 //   node scripts/connect.mjs --forget-judge  remove the saved judge connection
 //   node scripts/connect.mjs --custom --result <file>  any OpenAI-compatible endpoint (scripts/android-setup.sh)
+//     (--current <provider> --current-model <id> offer the saved endpoint's answers as defaults)
 //
 // It asks for the studio address and your API key, reads the list of models the
 // endpoint offers, and writes an "aistudio" provider into pi's models.json
@@ -302,24 +303,40 @@ const choose = (list, answer) =>
 // ---------- another endpoint (scripts/android-setup.sh --provider custom) ----------
 // Any OpenAI-compatible endpoint, under a provider name you choose. Writes it into models.json like
 // the studio, and the provider and the model DAVE starts on to --result <file> for the caller.
-// ENDPOINT_NAME, ENDPOINT_URL, ENDPOINT_API_KEY and ENDPOINT_MODEL in the environment skip the questions.
+// --current <provider> and --current-model <id> name the endpoint setup already saved: its name,
+// address, key and model become the defaults each question shows. ENDPOINT_NAME, ENDPOINT_URL,
+// ENDPOINT_API_KEY and ENDPOINT_MODEL in the environment skip the questions.
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
-async function connectCustom(resultFile) {
+async function connectCustom(resultFile, currentId = "", currentModel = "") {
   if (!resultFile) throw new Error("--custom needs --result <file>");
   const env = (k) => (process.env[k] || "").trim();
-  const name = env("ENDPOINT_NAME") || (await ask("  A name for this provider [custom]: ")) || "custom";
+  const config = await readJson(MODELS_FILE);
+  const saved = config.providers?.[currentId] || {};
+  const nameDefault = saved.name || currentId || "custom";
+  const name = env("ENDPOINT_NAME") || (await ask(`  A name for this provider [${nameDefault}]: `)) || nameDefault;
   const id = slug(name) || "custom";
   if (id === "dave-local") throw new Error("dave-local is the phone's own model; pick another name.");
   let url = env("ENDPOINT_URL");
   let key = env("ENDPOINT_API_KEY");
+  const urlDefault = saved.baseUrl || "";
+  // The saved key is offered once, and only while the address stays the saved one.
+  const savedKey = saved.apiKey && saved.apiKey !== "none" ? saved.apiKey : "";
+  let keyKept = false;
   const interactive = !url;
   let found = null;
 
   for (let tries = 0; tries < 3 && !found; tries++) {
-    if (!url) url = await ask("  Address (OpenAI-compatible, e.g. https://example.org/v1): ");
+    if (!url) {
+      const typed = await ask(urlDefault ? `  Address [${urlDefault}]: ` : "  Address (OpenAI-compatible, e.g. https://example.org/v1): ");
+      url = typed || urlDefault;
+    }
     if (!url) { warn("The address is needed to find the models."); continue; }
-    if (interactive && !key) key = await ask("  API key (press Enter for none; it won't show as you type): ", { hidden: true });
+    if (interactive && !key) {
+      const keep = savedKey && !keyKept && url === urlDefault;
+      key = await ask(keep ? "  API key (press Enter to keep the saved one; it won't show as you type): " : "  API key (press Enter for none; it won't show as you type): ", { hidden: true });
+      if (!key && keep) { key = savedKey; keyKept = true; }
+    }
     const got = await listModels(url, key, "The endpoint");
     if (got.problem === "key") { warn(got.message + " Check it for typos."); key = ""; if (!interactive) break; continue; }
     if (got.problem === "address") { warn(got.message); url = ""; if (!interactive) break; continue; }
@@ -332,14 +349,15 @@ async function connectCustom(resultFile) {
   const ids = models.map((m) => m.id);
   let model = env("ENDPOINT_MODEL");
   if (!model) {
+    const fallback = ids.includes(currentModel) ? currentModel : ids[0];
     say(`  Models at ${found.base}:`);
     ids.forEach((m, i) => say(`    ${i + 1}. ${m}`));
-    model = choose(ids, await ask("  Which one should DAVE start on? Pick one [1], or type a name: "));
+    const answer = await ask(`  Which one should DAVE start on? Pick one [${fallback}], or type a name: `);
+    model = answer ? choose(ids, answer) : fallback;
   }
   rl?.close();
   if (!ids.includes(model)) throw new Error(`${model} isn't one of the models ${found.base} lists.`);
 
-  const config = await readJson(MODELS_FILE);
   config.providers = config.providers || {};
   // A keyless endpoint still gets a placeholder: pi needs an apiKey for providers that define models.
   config.providers[id] = { name, baseUrl: found.base, api: "openai-completions", apiKey: key || "none", models };
@@ -406,8 +424,8 @@ async function connect() {
 }
 
 try {
-  const resultAt = process.argv.indexOf("--result");
-  if (process.argv.includes("--custom")) await connectCustom(resultAt > 0 ? process.argv[resultAt + 1] : "");
+  const arg = (flag) => { const i = process.argv.indexOf(flag); return i > 0 ? process.argv[i + 1] : ""; };
+  if (process.argv.includes("--custom")) await connectCustom(arg("--result"), arg("--current"), arg("--current-model"));
   else if (process.argv.includes("--forget-key")) await forget();
   else if (process.argv.includes("--forget-judge")) await forgetJudge();
   else if (process.argv.includes("--judge")) await connectJudge();

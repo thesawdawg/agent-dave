@@ -36,13 +36,16 @@ Pick [1]:
   (an OpenAI-compatible API on `127.0.0.1`), in which case requests stay on it.
 
 `--provider local` or `--provider custom` answers the question, for re-runs and scripts; without a terminal
-the script stops and asks for the flag. With `--provider custom`, `ENDPOINT_NAME`, `ENDPOINT_URL`,
-`ENDPOINT_API_KEY` and `ENDPOINT_MODEL` in the environment answer its questions.
+the script keeps the provider it saved before, or stops and asks for the flag on a first run. With
+`--provider custom`, `ENDPOINT_NAME`, `ENDPOINT_URL`, `ENDPOINT_API_KEY` and `ENDPOINT_MODEL` in the
+environment answer its questions.
 
 Either way it installs `nodejs`, `ripgrep`, `file` and `curl` if missing, checks Node 22.19+, asks for
 files access, and writes DAVE's choice to `~/.dave/android/hardware.json` and its settings to `config.json`.
-Safe to run again, also to switch between local and an endpoint; re-runs reset the read limit to match
-the model, keeping mount and delete settings.
+Safe to run again, also to switch between local and an endpoint: the previous run's answers are the
+defaults — Enter keeps the provider, the endpoint's name, address and key, and the local model, context,
+threads and port; a flag still wins. Re-runs reset the read limit to match the model, keeping mount and
+delete settings.
 
 pi comes from pi's own managed installer (`https://pi.dev/install.sh`), as on the desktop, not from
 `npm install -g`, which can hand out an older release. It lives in `~/.pi/agent` (launcher in
