@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
-import {blockedShellRef, DEFAULT_CONFIG, guard, loadConfig, reachNote, validateMount} from '../.pi/lib/android-guard.ts';
+import {addReachNote, blockedShellRef, DEFAULT_CONFIG, guard, loadConfig, reachNote, validateMount} from '../.pi/lib/android-guard.ts';
 
 /** A fake phone: Termux home with termux-setup-storage's links, shared storage beside it, and DAVE's protected files. */
 function phone() {
@@ -55,6 +55,15 @@ test('the model is told the exact mounted path, its other names, and that home s
   const note = reachNote(places, {...cfg(), mount});
   for (const want of [mount, '~/storage/shared/Docs', '/sdcard/Docs', 'does not reach the mounted folder']) assert.ok(note.includes(want), want);
   assert.match(reachNote(places, cfg()), /No shared-storage folder is mounted/);
+});
+
+test('the note reaches the prompt whether or not this pi version passes a sections map', () => {
+  const sections = {};
+  assert.equal(addReachNote({systemPrompt: 'base', systemPromptOptions: {sections}}, 'NOTE'), undefined);
+  assert.equal(sections.android_files, 'NOTE');
+  for (const systemPromptOptions of [{}, undefined]) {
+    assert.match(addReachNote({systemPrompt: 'base', systemPromptOptions}, 'NOTE').systemPrompt, /^base\n\n<android_files>\nNOTE\n<\/android_files>$/);
+  }
 });
 
 test('the model cannot change its own permissions, even by moving a folder that holds them', async () => {

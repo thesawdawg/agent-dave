@@ -13,6 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
+  addReachNote,
   blockedShellRef,
   DEFAULT_CONFIG,
   defaultPlaces,
@@ -97,10 +98,7 @@ export default function android(pi: ExtensionAPI): void {
   });
 
   // Tell the model, on every turn, exactly where its tools reach (the mount can change between turns).
-  pi.on("before_agent_start", async (event) => {
-    event.systemPromptOptions.sections.android_files = reachNote(places, config);
-    return undefined;
-  });
+  pi.on("before_agent_start", async (event) => addReachNote(event, reachNote(places, config)));
 
   // The same rule for pi's built-in tools. Relative paths resolve against pi's working folder, as pi does.
   pi.on("tool_call", async (event, ctx) => {

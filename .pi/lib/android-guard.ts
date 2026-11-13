@@ -188,6 +188,22 @@ export function reachNote(places: Places, config: Config): string {
   return lines.join("\n");
 }
 
+/**
+ * Puts the reach note into a before_agent_start event. Pi 1.5.2 hands handlers a `sections` map
+ * to edit in place; other versions may not, so then the note is appended to the returned prompt.
+ */
+export function addReachNote(
+  event: { systemPrompt: string; systemPromptOptions?: { sections?: Record<string, string> } },
+  note: string,
+): { systemPrompt: string } | undefined {
+  const sections = event.systemPromptOptions?.sections;
+  if (sections && typeof sections === "object") {
+    sections.android_files = note;
+    return undefined;
+  }
+  return { systemPrompt: `${event.systemPrompt}\n\n<android_files>\n${note}\n</android_files>` };
+}
+
 /** The real paths of every reachable place: home, plus the mount when one is set. */
 export async function roots(places: Places, config: Config): Promise<string[]> {
   const found = [await realish(places.home)];
