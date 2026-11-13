@@ -48,12 +48,16 @@ function modelUrl(file: string): string {
   }
 }
 
-/** The model setup picked, or null when hardware.json is missing, malformed or written with --no-model. */
-function readHardware(file: string): { modelId: string; ctx: number } | null {
+/** DAVE's model as setup chose it: a provider (`dave-local`, or an endpoint saved in pi's models.json) and a model. */
+type Choice = { provider: string; modelId: string; ctx: number };
+
+/** The model setup chose, or null when hardware.json is missing or malformed. */
+function readChoice(file: string): Choice | null {
   try {
-    const hw = JSON.parse(readFileSync(file, "utf8")) as { modelId?: unknown; ctx?: unknown };
+    const hw = JSON.parse(readFileSync(file, "utf8")) as { provider?: unknown; modelId?: unknown; ctx?: unknown };
     if (typeof hw.modelId !== "string" || !hw.modelId || !positive(hw.ctx)) return null;
-    return { modelId: hw.modelId, ctx: hw.ctx };
+    const provider = typeof hw.provider === "string" && hw.provider ? hw.provider : "dave-local";
+    return { provider, modelId: hw.modelId, ctx: hw.ctx };
   } catch {
     return null;
   }
@@ -67,7 +71,9 @@ export default function android(pi: ExtensionAPI): void {
 
   const hardware = path.join(places.state, "hardware.json");
   const url = modelUrl(hardware);
-  const hw = readHardware(hardware);
+  const choice = readChoice(hardware);
+  // Only the phone's own model is registered here; an endpoint from setup is already in pi's models.json.
+  const hw = choice?.provider === "dave-local" ? choice : null;
   if (hw) {
     pi.registerProvider("dave-local", {
       name: "DAVE local (llama.cpp)",
@@ -121,7 +127,7 @@ export default function android(pi: ExtensionAPI): void {
 
   /** Shows the permissions list above the editor; any other /dave:android command closes it. */
   const showPermissions = async (ctx: ExtensionCommandContext) => {
-    ctx.ui.setWidget(WIDGET, await permissionsReport(places, config, url));
+    ctx.ui.setWidget(WIDGET, await permissionsReport(places, config, url, choice ? `${choice.provider}/${choice.modelId}` : null));
     try {
       mkdirSync(places.state, { recursive: true });
       writeFileSync(path.join(places.state, "permissions-shown"), new Date().toISOString());

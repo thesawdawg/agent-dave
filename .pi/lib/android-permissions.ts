@@ -31,29 +31,44 @@ export async function storageGranted(places: Places): Promise<boolean> {
 const exists = (p: string) => fs.access(p).then(() => true, () => false);
 const mark = (ok: boolean) => (ok ? "✓" : "✗");
 
-/** The permissions report as lines, with live status marks. */
-export async function permissionsReport(places: Places, config: Config, url: string): Promise<string[]> {
-  const [storage, server, hardware, wake] = await Promise.all([
+/**
+ * The permissions report as lines, with live status marks. `model` is DAVE's model as
+ * `provider/id` from setup (`dave-local/...` for the phone's own), or null before setup.
+ */
+export async function permissionsReport(places: Places, config: Config, url: string, model: string | null): Promise<string[]> {
+  const local = !model || model.startsWith("dave-local/");
+  const [storage, server, wake] = await Promise.all([
     storageGranted(places),
-    serverState(url),
-    exists(path.join(places.state, "hardware.json")),
+    local ? serverState(url) : Promise.resolve("not used"),
     exists(path.join(places.state, "wakelock")),
   ]);
+  const modelLines = local
+    ? [
+        `  ${mark(!!model)} Model: ${model ?? "not set up (bash scripts/android-setup.sh)"} · server on ${url.replace("http://", "")}: ${server}`,
+        `  ${wake ? "•" : "○"} Wake lock: ${wake ? "held while the model serves" : "not held"} (released by dave-android.sh stop).`,
+        "  • Network: the first model start downloads the model; after that, only 127.0.0.1.",
+      ]
+    : [
+        `  ✓ Model: ${model} (an endpoint from setup, saved in ~/.pi/agent/models.json)`,
+        "  • Network: every request to the model goes to that endpoint over the internet or your network.",
+      ];
   return [
     "DAVE on Android: permissions and settings  (full list: docs/android.md)",
     "",
     "Android settings for Termux",
     `  ${mark(storage)} Files access: run termux-setup-storage and allow it. Needed only to mount a shared folder.`,
-    "  • Battery: Settings > Apps > Termux > Battery > Unrestricted, or One UI stops the model server.",
-    "  • Android 12+: turn off child process restrictions (Developer options on 14+, adb on 12-13),",
-    "    or Android may kill llama-server with signal 9. See docs/android.md.",
-    "  • Notifications for Termux (Android 13+, optional): shows the wake lock and an Exit button.",
+    "  • Battery: Settings > Apps > Termux > Battery > Unrestricted, or One UI stops Termux in the background.",
+    ...(local
+      ? [
+          "  • Android 12+: turn off child process restrictions (Developer options on 14+, adb on 12-13),",
+          "    or Android may kill llama-server with signal 9. See docs/android.md.",
+        ]
+      : []),
+    "  • Notifications for Termux (Android 13+, optional): shows Termux's notification and an Exit button.",
     "",
     "Termux user",
-    "  • Reads and writes Termux home; runs node, pi, llama-server, rg and file (setup installs them).",
-    `  ${mark(hardware)} Model set up by scripts/android-setup.sh · server on ${url.replace("http://", "")}: ${server}`,
-    `  ${wake ? "•" : "○"} Wake lock: ${wake ? "held while the model serves" : "not held"} (released by dave-android.sh stop).`,
-    "  • Network: the first model start downloads the model; after that, only 127.0.0.1.",
+    `  • Reads and writes Termux home; runs node, pi, rg and file${local ? ", llama-server" : ""} (setup installs them).`,
+    ...modelLines,
     "",
     "DAVE's tools",
     "  • list_dir, read_file, search_files, file_info: read Termux home and the mounted folder.",

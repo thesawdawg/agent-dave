@@ -13,11 +13,29 @@ Install Termux from [F-Droid or GitHub](https://github.com/termux/termux-app#ins
 bash scripts/android-setup.sh
 ```
 
-It installs `nodejs`, `ripgrep`, `llama-cpp` and `file` if missing, checks Node 22.19+, installs pi,
-asks for files access, picks a model size from your RAM, and writes `~/.dave/android/hardware.json`
-and `config.json`. Options: `--model <hf-repo:quant>`, `--ctx <tokens>`, `--threads <n>`,
-`--port <n>` (model server port, default 8080), `--no-model`.
-Safe to run again.
+It first asks which model DAVE uses. You must answer; Enter picks the default:
+
+```text
+Which model should DAVE use?
+  1) Local: llama.cpp on this phone (no network after the first download)  [default]
+  2) Another OpenAI-compatible endpoint (name, address, API key)
+Pick [1]:
+```
+
+- **Local** installs `llama-cpp` and picks a model size from your RAM. Options: `--model <hf-repo:quant>`,
+  `--ctx <tokens>`, `--threads <n>`, `--port <n>` (model server port, default 8080).
+- **Another endpoint** asks for a name, the address and an API key (Enter for none), lists the endpoint's
+  models and asks which one DAVE starts on. It saves the endpoint into pi's `~/.pi/agent/models.json`
+  under that name, the same way the desktop setup saves the studio ([scripts/connect.mjs](../scripts/connect.mjs)).
+  Every request to the model then leaves the phone.
+
+`--provider local` or `--provider custom` answers the question, for re-runs and scripts; without a terminal
+the script stops and asks for the flag. With `--provider custom`, `ENDPOINT_NAME`, `ENDPOINT_URL`,
+`ENDPOINT_API_KEY` and `ENDPOINT_MODEL` in the environment answer its questions.
+
+Either way it installs `nodejs`, `ripgrep` and `file` if missing, checks Node 22.19+, installs pi, asks for
+files access, and writes DAVE's choice to `~/.dave/android/hardware.json` and its settings to `config.json`.
+Safe to run again, also to switch between local and an endpoint.
 
 ## Start and stop
 
@@ -31,6 +49,8 @@ Safe to run again.
 | Model log | `bash scripts/dave-android.sh logs` (`-f` to follow) | The last 50 lines of `~/.dave/android/llm.log`. |
 
 Inside pi: `/dave:android model start|stop|status` does the same for the model server.
+With an endpoint instead of the local model, `start` just opens pi on it; `serve` explains there is no
+local server, and `stop` only releases the wake lock.
 The first time you open pi, trust the project when asked; DAVE's extensions load only in a trusted project.
 
 What runs, and where it is recorded:
@@ -63,8 +83,8 @@ No root, no Termux:API app, and no other Android permission is needed.
 
 - Reads and writes its own home (`/data/data/com.termux/files/home`), as every Termux user does.
 - Runs `node`, `pi`, `llama-server`, `rg` and `file`; setup installs them.
-- Listens only on `127.0.0.1:8080` (the model). The first model start downloads the model from Hugging Face; after that DAVE makes no network calls of its own.
-- Holds a wake lock while the model serves.
+- Local model: listens only on `127.0.0.1:8080`. The first model start downloads the model from Hugging Face; after that DAVE makes no network calls of its own. Holds a wake lock while the model serves.
+- Endpoint: no local server or wake lock; every request to the model goes to the endpoint you chose in setup.
 
 ### DAVE's tools
 
@@ -96,7 +116,9 @@ No tool may read `.env` files or Pi's key files (`auth.json`, `models.json`, `gu
 | `outside Termux home ...` | Expected: mount the folder with `/dave:android mount <folder>`. |
 | `protected DAVE/Pi path` | Expected: the model tried to change its own settings. |
 | `saved mount ... is closed for now` | The mounted folder is gone or files access was revoked. Fix that and restart pi, or mount again. |
-| pi starts on another model | Start with `dave-android.sh start`, or `/model` and pick `dave-local`. |
+| pi starts on another model | Start with `dave-android.sh start`, or `/model` and pick DAVE's (`dave-android.sh status` names it). |
+| `there is no local model server` | DAVE uses an endpoint. To go local: `bash scripts/android-setup.sh --provider local`. |
+| `Couldn't connect to that endpoint` | Check the address ends at the API root (often `/v1`) and the key; run setup again. |
 | `fetch` MCP server failed at startup | Expected on the phone: it needs `uvx`, which setup doesn't install. |
 
 ## Not yet verified on a device

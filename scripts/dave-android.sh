@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Start and stop DAVE on an Android phone (Termux). Run scripts/android-setup.sh once first.
 #
-#   bash scripts/dave-android.sh start [pi args]   start the model server, wait until it's ready, open pi on it
-#   bash scripts/dave-android.sh serve [--no-wait] start only the model server (in the background)
-#   bash scripts/dave-android.sh stop              stop the model server and release the wake lock
-#   bash scripts/dave-android.sh status            model server, wake lock, storage access, mount
-#   bash scripts/dave-android.sh logs [-f]         the model server's log (-f keeps following it)
+#   bash scripts/dave-android.sh start [pi args]   open pi on DAVE's model (a local one is started first)
+#   bash scripts/dave-android.sh serve [--no-wait] start only the local model server (in the background)
+#   bash scripts/dave-android.sh stop              stop the local model server and release the wake lock
+#   bash scripts/dave-android.sh status            provider, model server, wake lock, storage access, mount
+#   bash scripts/dave-android.sh logs [-f]         the local model server's log (-f keeps following it)
 #
 # pi itself stops with /quit (or Ctrl+C twice); the model server keeps running until "stop".
 # Inside pi the same server controls are /dave:android model start|stop|status.
+# With an endpoint from setup's --provider custom there is no local server: start just opens pi on it.
 set -euo pipefail
 
 DAVE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -33,6 +34,8 @@ hw() { node -e 'try { const v = require(process.argv[1])[process.argv[2]]; proce
 
 PORT=$(hw port); PORT=${PORT:-8080}
 URL="http://127.0.0.1:$PORT"
+# dave-local is the phone's own llama.cpp; anything else is an endpoint setup saved in pi's models.json.
+PROVIDER=$(hw provider); PROVIDER=${PROVIDER:-dave-local}
 
 # The server's pid if our llama-server is running, else nothing (a stale pidfile is removed).
 server_pid() {
@@ -57,8 +60,9 @@ wake_unlock() { command -v termux-wake-unlock >/dev/null && termux-wake-unlock |
 serve() {
   local wait=1; [ "${1:-}" = "--no-wait" ] && wait=0
   [ -f "$HARDWARE" ] || fail "not set up yet: run bash scripts/android-setup.sh"
+  [ "$PROVIDER" = dave-local ] || fail "DAVE uses the endpoint $PROVIDER, so there is no local model server. To switch: bash scripts/android-setup.sh --provider local"
   local model ctx threads; model=$(hw model); ctx=$(hw ctx); threads=$(hw threads)
-  [ -n "$model" ] || fail "no local model configured (setup ran with --no-model)"
+  [ -n "$model" ] || fail "no local model configured: run bash scripts/android-setup.sh --provider local"
   command -v llama-server >/dev/null || fail "llama-server not found: run bash scripts/android-setup.sh"
 
   local pid; pid=$(server_pid)
@@ -109,8 +113,11 @@ stop() {
 }
 
 status() {
+  if [ -f "$HARDWARE" ]; then ok "model: $PROVIDER/$(hw modelId)"; else warn "model: not set up (bash scripts/android-setup.sh)"; fi
   local pid; pid=$(server_pid)
-  if [ -n "$pid" ]; then ok "model server: pid $pid, $(health) ($(hw modelId))"; else warn "model server: stopped"; fi
+  if [ -n "$pid" ]; then ok "model server: pid $pid, $(health)"
+  elif [ "$PROVIDER" = dave-local ]; then warn "model server: stopped"
+  else ok "model server: none (remote endpoint)"; fi
   if [ -f "$WAKE" ]; then ok "wake lock: held"; else ok "wake lock: not held"; fi
   if ls /storage/emulated/0 >/dev/null 2>&1; then ok "files access: granted"; else warn "files access: not granted (termux-setup-storage)"; fi
   # shellcheck disable=SC2016 # ${...} below is JavaScript, not shell
@@ -123,10 +130,12 @@ logs() {
 }
 
 start() {
-  serve
+  [ -f "$HARDWARE" ] || fail "not set up yet: run bash scripts/android-setup.sh"
+  [ "$PROVIDER" != dave-local ] || serve
   local id; id=$(hw modelId)
+  [ -n "$id" ] || fail "no model chosen yet: run bash scripts/android-setup.sh"
   cd "$DAVE_DIR"
-  exec pi --model "dave-local/$id" "$@"
+  exec pi --model "$PROVIDER/$id" "$@"
 }
 
 cmd="${1:-help}"; [ $# -gt 0 ] && shift

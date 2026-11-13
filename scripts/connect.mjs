@@ -5,6 +5,7 @@
 //   node scripts/connect.mjs --forget-key  remove the saved studio connection (shared machines)
 //   node scripts/connect.mjs --judge       connect the guard's judge: a separate decision model
 //   node scripts/connect.mjs --forget-judge  remove the saved judge connection
+//   node scripts/connect.mjs --custom --result <file>  any OpenAI-compatible endpoint (scripts/android-setup.sh)
 //
 // It asks for the studio address and your API key, reads the list of models the
 // endpoint offers, and writes an "aistudio" provider into pi's models.json
@@ -101,7 +102,7 @@ function candidates(raw) {
   return [`${url}/api`, `${url}/v1`, url];
 }
 
-async function listModels(raw, key) {
+async function listModels(raw, key, who = "The studio") {
   if (!/^https?:\/\//i.test(raw.trim())) return { problem: "address", message: "The address should start with http:// or https://" };
   let last = "";
   for (const base of candidates(raw)) {
@@ -112,7 +113,7 @@ async function listModels(raw, key) {
       last = `couldn't reach ${base} (${err.cause?.code || err.name})`;
       continue;
     }
-    if (res.status === 401 || res.status === 403) return { problem: "key", message: "The studio didn't accept that key." };
+    if (res.status === 401 || res.status === 403) return { problem: "key", message: `${who} didn't accept that key.` };
     if (!res.ok) { last = `${base}/models answered ${res.status}`; continue; }
     let body;
     try { body = await res.json(); } catch { last = `${base}/models didn't return JSON`; continue; }
@@ -256,8 +257,7 @@ async function connectJudge() {
   if (found.length) {
     say(`  Decision models at ${url}:`);
     found.forEach((m, i) => say(`    ${i + 1}. ${m}`));
-    const pick = await ask(`  Pick one [1], or type a name: `);
-    model = !pick ? found[0] : /^\d+$/.test(pick) && found[Number(pick) - 1] ? found[Number(pick) - 1] : pick;
+    model = choose(found, await ask(`  Pick one [1], or type a name: `));
   } else {
     const fallbackModel = saved.model || "clef:27b";
     model = (await ask(`  Model [${fallbackModel}]: `)) || fallbackModel;
@@ -293,6 +293,61 @@ async function forgetJudge() {
   await rm(JUDGE_FILE, { force: true });
   if (otherCommandsIsCheck()) setOtherCommands(undefined);
   ok("Removed the judge connection. Commands no rule matches go back to the dial.");
+}
+
+// An answer to "Pick one [1], or type a name": Enter is the first, a number picks, anything else is a name.
+const choose = (list, answer) =>
+  !answer ? list[0] : /^\d+$/.test(answer) && list[Number(answer) - 1] ? list[Number(answer) - 1] : answer;
+
+// ---------- another endpoint (scripts/android-setup.sh --provider custom) ----------
+// Any OpenAI-compatible endpoint, under a provider name you choose. Writes it into models.json like
+// the studio, and the provider and the model DAVE starts on to --result <file> for the caller.
+// ENDPOINT_NAME, ENDPOINT_URL, ENDPOINT_API_KEY and ENDPOINT_MODEL in the environment skip the questions.
+const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+async function connectCustom(resultFile) {
+  if (!resultFile) throw new Error("--custom needs --result <file>");
+  const env = (k) => (process.env[k] || "").trim();
+  const name = env("ENDPOINT_NAME") || (await ask("  A name for this provider [custom]: ")) || "custom";
+  const id = slug(name) || "custom";
+  if (id === "dave-local") throw new Error("dave-local is the phone's own model; pick another name.");
+  let url = env("ENDPOINT_URL");
+  let key = env("ENDPOINT_API_KEY");
+  const interactive = !url;
+  let found = null;
+
+  for (let tries = 0; tries < 3 && !found; tries++) {
+    if (!url) url = await ask("  Address (OpenAI-compatible, e.g. https://example.org/v1): ");
+    if (!url) { warn("The address is needed to find the models."); continue; }
+    if (interactive && !key) key = await ask("  API key (press Enter for none; it won't show as you type): ", { hidden: true });
+    const got = await listModels(url, key, "The endpoint");
+    if (got.problem === "key") { warn(got.message + " Check it for typos."); key = ""; if (!interactive) break; continue; }
+    if (got.problem === "address") { warn(got.message); url = ""; if (!interactive) break; continue; }
+    found = got;
+  }
+  if (!found) { rl?.close(); throw new Error("Couldn't connect to that endpoint. Run setup again with the right address and key."); }
+
+  const models = found.models.filter(usable).map(toPiModel).sort((a, b) => a.id.localeCompare(b.id));
+  if (!models.length) { rl?.close(); throw new Error(`Connected to ${found.base}, but it lists no models for this key.`); }
+  const ids = models.map((m) => m.id);
+  let model = env("ENDPOINT_MODEL");
+  if (!model) {
+    say(`  Models at ${found.base}:`);
+    ids.forEach((m, i) => say(`    ${i + 1}. ${m}`));
+    model = choose(ids, await ask("  Which one should DAVE start on? Pick one [1], or type a name: "));
+  }
+  rl?.close();
+  if (!ids.includes(model)) throw new Error(`${model} isn't one of the models ${found.base} lists.`);
+
+  const config = await readJson(MODELS_FILE);
+  config.providers = config.providers || {};
+  // A keyless endpoint still gets a placeholder: pi needs an apiKey for providers that define models.
+  config.providers[id] = { name, baseUrl: found.base, api: "openai-completions", apiKey: key || "none", models };
+  await saveModels(config);
+  const contextWindow = models.find((m) => m.id === model)?.contextWindow ?? null;
+  await writeFile(resultFile, JSON.stringify({ provider: id, model, contextWindow }) + "\n", "utf8");
+  ok(`Connected to ${found.base}; saved ${models.length} model${models.length === 1 ? "" : "s"} as provider "${id}" in ${MODELS_FILE}`);
+  ok(`DAVE starts on ${id}/${model}`);
 }
 
 // ---------- commands ----------
@@ -351,7 +406,9 @@ async function connect() {
 }
 
 try {
-  if (process.argv.includes("--forget-key")) await forget();
+  const resultAt = process.argv.indexOf("--result");
+  if (process.argv.includes("--custom")) await connectCustom(resultAt > 0 ? process.argv[resultAt + 1] : "");
+  else if (process.argv.includes("--forget-key")) await forget();
   else if (process.argv.includes("--forget-judge")) await forgetJudge();
   else if (process.argv.includes("--judge")) await connectJudge();
   else await connect();
