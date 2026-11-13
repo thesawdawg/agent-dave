@@ -122,10 +122,11 @@ fi
 mkdir -p "$STATE"
 
 # ---------- 4. The model ----------
-# write_model <provider> <modelId> <hf model or ""> <ctx> <threads> <port>: DAVE's model choice, as JSON.
+# write_model <provider> <modelId> <hf model or ""> <ctx> <threads> <port> <endpoint url or "">: DAVE's
+# model choice, as JSON. endpoint is a custom provider's base URL; empty means the local model.
 write_model() {
-  node -e 'const [provider, modelId, model, ctx, threads, port] = process.argv.slice(1);
-    process.stdout.write(JSON.stringify({ provider, modelId, model: model || null, ctx: Number(ctx), threads: Number(threads), port: Number(port) }) + "\n");' \
+  node -e 'const [provider, modelId, model, ctx, threads, port, endpoint] = process.argv.slice(1);
+    process.stdout.write(JSON.stringify({ provider, modelId, model: model || null, ctx: Number(ctx), threads: Number(threads), port: Number(port), endpoint: endpoint || null }) + "\n");' \
     "$@" > "$STATE/hardware.json"
 }
 
@@ -143,31 +144,37 @@ if [ "$PROVIDER" = local ]; then
   FREE_GB=$(df -Pk "$HOME" | awk 'NR == 2 {print int($4 / 1048576)}')
 
   # MemTotal reads below the advertised RAM (an "8GB" phone shows about 7.4GB), so the cutoffs sit lower.
-  if   [ "$RAM_MB" -ge 11000 ]; then MODEL="LiquidAI/LFM2.5-8B-A1B-GGUF:Q4_K_M";       CTX=32768
-  elif [ "$RAM_MB" -ge 7000 ];  then MODEL="LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M";          CTX=16384
-  elif [ "$RAM_MB" -ge 3500 ];  then MODEL="LiquidAI/LFM2.5-1.2B-Instruct-GGUF:Q4_K_M"; CTX=16384
+  if   [ "$RAM_MB" -ge 11000 ]; then MODEL="LiquidAI/LFM2.5-8B-A1B-GGUF:Q4_0";          CTX=32768
+  elif [ "$RAM_MB" -ge 7000 ];  then MODEL="LiquidAI/LFM2.5-2.6B-GGUF:Q4_0";             CTX=16384
+  elif [ "$RAM_MB" -ge 3500 ];  then MODEL="LiquidAI/LFM2.5-1.2B-Instruct-GGUF:Q4_0";    CTX=16384
   else                               MODEL="LiquidAI/LFM2.5-350M-GGUF:Q4_0";             CTX=8192
   fi
   MODEL=${MODEL_OVERRIDE:-$MODEL}
   CTX=${CTX_OVERRIDE:-$CTX}
   MODEL_ID=$(basename "${MODEL%%:*}" | sed 's/-GGUF$//')
   [ "$FREE_GB" -ge 8 ] || warn "under 8GB free; the model download may fail"
-  write_model dave-local "$MODEL_ID" "$MODEL" "$CTX" "$THREADS" "$PORT"
+  write_model dave-local "$MODEL_ID" "$MODEL" "$CTX" "$THREADS" "$PORT" ""
   ok "RAM ${RAM_MB}MB, fast cores $BIG, i8mm=$I8MM -> $MODEL_ID, ctx $CTX, threads $THREADS, port $PORT"
 else
   printf '\n'
   RESULT="$STATE/endpoint.json"
   node "$DAVE_DIR/scripts/connect.mjs" --custom --result "$RESULT"
   read_result() { node -e 'const r = require(process.argv[1]); const v = r[process.argv[2]]; process.stdout.write(v == null ? "" : String(v));' "$RESULT" "$1"; }
-  ENDPOINT=$(read_result provider); MODEL_ID=$(read_result model); CTX=$(read_result contextWindow)
+  ENDPOINT=$(read_result provider); MODEL_ID=$(read_result model); CTX=$(read_result contextWindow); BASE_URL=$(read_result baseUrl)
   CTX=${CTX:-32768}
   rm -f "$RESULT"
-  write_model "$ENDPOINT" "$MODEL_ID" "" "$CTX" 0 "$PORT"
+  write_model "$ENDPOINT" "$MODEL_ID" "" "$CTX" 0 "$PORT" "$BASE_URL"
 fi
 
 # read_file returns at most this many bytes: about a quarter of the model's context, at most 64KB.
 READ_BYTES=$(( CTX < 65536 ? CTX : 65536 ))
-[ -f "$STATE/config.json" ] || printf '{"mount":null,"allowDelete":false,"maxReadBytes":%s}\n' "$READ_BYTES" > "$STATE/config.json"
+# Re-runs update only the read limit to match the model; mount, delete and any other keys stay.
+node -e 'const fs = require("fs"); const f = process.argv[1];
+  let c;
+  try { const p = JSON.parse(fs.readFileSync(f, "utf8")); if (p && typeof p === "object" && !Array.isArray(p)) c = p; } catch {}
+  c = c || { mount: null, allowDelete: false };
+  c.maxReadBytes = Number(process.argv[2]);
+  fs.writeFileSync(f, JSON.stringify(c) + "\n");' "$STATE/config.json" "$READ_BYTES"
 chmod 600 "$STATE/config.json"
 ok "state in $STATE"
 
@@ -179,7 +186,13 @@ if [ "$PROVIDER" = local ]; then
   printf '  bash scripts/dave-android.sh start    starts the model (the first start downloads it), then pi\n'
   printf '  bash scripts/dave-android.sh stop     stops the model and releases the wake lock\n'
 else
-  warn "Every request now goes to $ENDPOINT over the network"
+  # The same loopback rule the permissions report uses.
+  if node --input-type=module -e 'const { isLoopback } = await import(process.argv[1]); process.exit(isLoopback(process.argv[2]) ? 0 : 1);' \
+    "$DAVE_DIR/.pi/lib/android-permissions.ts" "$BASE_URL"; then
+    ok "the model is served by an app on this phone at $BASE_URL; keep that app running"
+  else
+    warn "Every request now goes to $BASE_URL over the network"
+  fi
   printf '\nNext:\n'
   printf '  bash scripts/dave-android.sh start    opens pi on %s/%s\n' "$ENDPOINT" "$MODEL_ID"
 fi

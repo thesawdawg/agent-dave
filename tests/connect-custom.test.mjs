@@ -25,7 +25,7 @@ test('connect.mjs --custom saves any OpenAI-compatible endpoint and reports the 
     env: {...process.env, PI_CODING_AGENT_DIR: agent, ENDPOINT_NAME: 'Home Lab', ENDPOINT_URL: `http://127.0.0.1:${server.address().port}/v1`, ENDPOINT_MODEL: 'big-70b'},
   });
 
-  assert.deepEqual(JSON.parse(readFileSync(result, 'utf8')), {provider: 'home-lab', model: 'big-70b', contextWindow: null});
+  assert.deepEqual(JSON.parse(readFileSync(result, 'utf8')), {provider: 'home-lab', model: 'big-70b', contextWindow: null, baseUrl: `http://127.0.0.1:${server.address().port}/v1`});
   const providers = JSON.parse(readFileSync(path.join(agent, 'models.json'), 'utf8')).providers;
   assert.equal(providers.aistudio.baseUrl, 'https://studio.example', 'other providers are kept');
   assert.equal(providers['home-lab'].apiKey, 'none', 'a keyless endpoint gets a placeholder key');

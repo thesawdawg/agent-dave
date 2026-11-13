@@ -49,15 +49,16 @@ function modelUrl(file: string): string {
 }
 
 /** DAVE's model as setup chose it: a provider (`dave-local`, or an endpoint saved in pi's models.json) and a model. */
-type Choice = { provider: string; modelId: string; ctx: number };
+type Choice = { provider: string; modelId: string; ctx: number; endpoint: string | null };
 
 /** The model setup chose, or null when hardware.json is missing or malformed. */
 function readChoice(file: string): Choice | null {
   try {
-    const hw = JSON.parse(readFileSync(file, "utf8")) as { provider?: unknown; modelId?: unknown; ctx?: unknown };
+    const hw = JSON.parse(readFileSync(file, "utf8")) as { provider?: unknown; modelId?: unknown; ctx?: unknown; endpoint?: unknown };
     if (typeof hw.modelId !== "string" || !hw.modelId || !positive(hw.ctx)) return null;
     const provider = typeof hw.provider === "string" && hw.provider ? hw.provider : "dave-local";
-    return { provider, modelId: hw.modelId, ctx: hw.ctx };
+    const endpoint = typeof hw.endpoint === "string" && hw.endpoint ? hw.endpoint : null;
+    return { provider, modelId: hw.modelId, ctx: hw.ctx, endpoint };
   } catch {
     return null;
   }
@@ -127,7 +128,7 @@ export default function android(pi: ExtensionAPI): void {
 
   /** Shows the permissions list above the editor; any other /dave:android command closes it. */
   const showPermissions = async (ctx: ExtensionCommandContext) => {
-    ctx.ui.setWidget(WIDGET, await permissionsReport(places, config, url, choice ? `${choice.provider}/${choice.modelId}` : null));
+    ctx.ui.setWidget(WIDGET, await permissionsReport(places, config, url, choice ? `${choice.provider}/${choice.modelId}` : null, choice?.endpoint ?? null));
     try {
       mkdirSync(places.state, { recursive: true });
       writeFileSync(path.join(places.state, "permissions-shown"), new Date().toISOString());

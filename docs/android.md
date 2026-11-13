@@ -5,6 +5,9 @@ llama.cpp on `127.0.0.1:8080`, and native file tools that reach only Termux home
 shared-storage folder you choose. The extension is [`.pi/extensions/android.ts`](../.pi/extensions/android.ts);
 on a desktop it does nothing.
 
+Android is an add-on: DAVE is a computer agent first (Linux-first, with macOS and Windows supported),
+and the phone runs the same repo in Termux. iOS is not planned.
+
 ## Set up (once)
 
 Install Termux from [F-Droid or GitHub](https://github.com/termux/termux-app#installation) (not Google Play), clone this repo inside Termux, then:
@@ -27,7 +30,8 @@ Pick [1]:
 - **Another endpoint** asks for a name, the address and an API key (Enter for none), lists the endpoint's
   models and asks which one DAVE starts on. It saves the endpoint into pi's `~/.pi/agent/models.json`
   under that name, the same way the desktop setup saves the studio ([scripts/connect.mjs](../scripts/connect.mjs)).
-  Every request to the model then leaves the phone.
+  Every request to the model then leaves the phone — unless the endpoint is an app on the phone itself
+  (an OpenAI-compatible API on `127.0.0.1`), in which case requests stay on it.
 
 `--provider local` or `--provider custom` answers the question, for re-runs and scripts; without a terminal
 the script stops and asks for the flag. With `--provider custom`, `ENDPOINT_NAME`, `ENDPOINT_URL`,
@@ -35,7 +39,8 @@ the script stops and asks for the flag. With `--provider custom`, `ENDPOINT_NAME
 
 Either way it installs `nodejs`, `ripgrep`, `file` and `curl` if missing, checks Node 22.19+, asks for
 files access, and writes DAVE's choice to `~/.dave/android/hardware.json` and its settings to `config.json`.
-Safe to run again, also to switch between local and an endpoint.
+Safe to run again, also to switch between local and an endpoint; re-runs reset the read limit to match
+the model, keeping mount and delete settings.
 
 pi comes from pi's own managed installer (`https://pi.dev/install.sh`), as on the desktop, not from
 `npm install -g`, which can hand out an older release. It lives in `~/.pi/agent` (launcher in
@@ -89,7 +94,8 @@ No root, no Termux:API app, and no other Android permission is needed.
 - Reads and writes its own home (`/data/data/com.termux/files/home`), as every Termux user does.
 - Runs `node`, `pi`, `llama-server`, `rg` and `file`; setup installs them.
 - Local model: listens only on `127.0.0.1:8080`. The first model start downloads the model from Hugging Face; after that DAVE makes no network calls of its own. Holds a wake lock while the model serves.
-- Endpoint: no local server or wake lock; every request to the model goes to the endpoint you chose in setup.
+- Endpoint: no local server or wake lock; every request to the model goes to the endpoint you chose in
+  setup — or stays on the phone, when the endpoint is an app serving an OpenAI-compatible API on `127.0.0.1`.
 
 ### DAVE's tools
 
@@ -129,6 +135,5 @@ No tool may read `.env` files or Pi's key files (`auth.json`, `models.json`, `gu
 
 ## Not yet verified on a device
 
-- The LFM2.5 Hugging Face repo names in the setup script's tiers.
 - That Termux's `llama-cpp` package can download with `-hf`.
 - Whether the largest tier fits in free memory on a 12GB phone.

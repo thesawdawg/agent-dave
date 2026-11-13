@@ -345,7 +345,7 @@ async function connectCustom(resultFile) {
   config.providers[id] = { name, baseUrl: found.base, api: "openai-completions", apiKey: key || "none", models };
   await saveModels(config);
   const contextWindow = models.find((m) => m.id === model)?.contextWindow ?? null;
-  await writeFile(resultFile, JSON.stringify({ provider: id, model, contextWindow }) + "\n", "utf8");
+  await writeFile(resultFile, JSON.stringify({ provider: id, model, contextWindow, baseUrl: found.base }) + "\n", "utf8");
   ok(`Connected to ${found.base}; saved ${models.length} model${models.length === 1 ? "" : "s"} as provider "${id}" in ${MODELS_FILE}`);
   ok(`DAVE starts on ${id}/${model}`);
 }

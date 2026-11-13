@@ -31,11 +31,24 @@ export async function storageGranted(places: Places): Promise<boolean> {
 const exists = (p: string) => fs.access(p).then(() => true, () => false);
 const mark = (ok: boolean) => (ok ? "✓" : "✗");
 
+/** True when `url` is served on this phone: localhost, a 127.0.0.0/8 address or ::1. */
+export function isLoopback(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return false;
+  }
+  // The URL parser canonicalizes IPv4 (127.1 becomes 127.0.0.1) and brackets IPv6 ([::1]).
+  return host === "localhost" || host === "[::1]" || host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
 /**
  * The permissions report as lines, with live status marks. `model` is DAVE's model as
  * `provider/id` from setup (`dave-local/...` for the phone's own), or null before setup.
+ * `endpoint` is a custom provider's base URL from setup, null for the local model.
  */
-export async function permissionsReport(places: Places, config: Config, url: string, model: string | null): Promise<string[]> {
+export async function permissionsReport(places: Places, config: Config, url: string, model: string | null, endpoint: string | null): Promise<string[]> {
   const local = !model || model.startsWith("dave-local/");
   const [storage, server, wake] = await Promise.all([
     storageGranted(places),
@@ -48,10 +61,16 @@ export async function permissionsReport(places: Places, config: Config, url: str
         `  ${wake ? "•" : "○"} Wake lock: ${wake ? "held while the model serves" : "not held"} (released by dave-android.sh stop).`,
         "  • Network: the first model start downloads the model; after that, only 127.0.0.1.",
       ]
-    : [
-        `  ✓ Model: ${model} (an endpoint from setup, saved in ~/.pi/agent/models.json)`,
-        "  • Network: every request to the model goes to that endpoint over the internet or your network.",
-      ];
+    : endpoint && isLoopback(endpoint)
+      ? [
+          `  ✓ Model: ${model} (an app on this phone at ${endpoint}, saved in ~/.pi/agent/models.json)`,
+          "  • Network: requests to the model stay on this phone.",
+          "  • The app serving the model needs its own battery/background settings, or Android may stop it.",
+        ]
+      : [
+          `  ✓ Model: ${model} (an endpoint from setup, saved in ~/.pi/agent/models.json)`,
+          "  • Network: every request to the model goes to that endpoint over the internet or your network.",
+        ];
   return [
     "DAVE on Android: permissions and settings  (full list: docs/android.md)",
     "",
