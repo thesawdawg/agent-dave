@@ -4,6 +4,10 @@
 #   bash scripts/android-setup.sh                    asks which model DAVE uses, then sets it up
 #   bash scripts/android-setup.sh --provider local   llama.cpp on this phone (the default answer)
 #   bash scripts/android-setup.sh --provider custom  any OpenAI-compatible endpoint: name, address, API key
+#   bash scripts/android-setup.sh --update-pi        also update pi to its latest release
+#
+# pi comes from its own managed installer (https://pi.dev/install.sh), as in setup.sh, not npm:
+# npm can hand out an older release. An npm-installed pi is replaced. PI_INSTALL_URL overrides the address.
 #
 # Only with --provider local:
 #   --model REPO:Q   use this Hugging Face GGUF instead of the tier picked from your RAM
@@ -20,7 +24,11 @@ set -euo pipefail
 
 DAVE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 STATE="$HOME/.dave/android"
-PROVIDER=""; MODEL_OVERRIDE=""; CTX_OVERRIDE=""; THREADS_OVERRIDE=""; PORT=8080; LOCAL_FLAGS=0
+PI_INSTALL_URL="${PI_INSTALL_URL:-https://pi.dev/install.sh}"
+PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+# The managed pi's launcher lives here; first on PATH so this run (and the installer) use it.
+export PATH="$PI_AGENT_DIR/bin:$PATH"
+PROVIDER=""; MODEL_OVERRIDE=""; CTX_OVERRIDE=""; THREADS_OVERRIDE=""; PORT=8080; LOCAL_FLAGS=0; UPDATE_PI=0
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
@@ -39,6 +47,7 @@ while [ $# -gt 0 ]; do
     --ctx)      CTX_OVERRIDE=$(value "$1" "${2:-}" number); LOCAL_FLAGS=1; shift 2 ;;
     --threads)  THREADS_OVERRIDE=$(value "$1" "${2:-}" number); LOCAL_FLAGS=1; shift 2 ;;
     --port)     PORT=$(value "$1" "${2:-}" number); LOCAL_FLAGS=1; shift 2 ;;
+    --update-pi) UPDATE_PI=1; shift ;;
     --no-model) fail "--no-model is now --provider custom" ;;
     *) fail "unknown flag: $1" ;;
   esac
@@ -68,7 +77,7 @@ ok "provider: $PROVIDER"
 # ---------- 3. Packages ----------
 [ "$PROVIDER" != local ] || [ "$(uname -m)" = aarch64 ] || warn "not arm64; expect slow inference"
 NEED=()
-PACKAGES=(nodejs:node ripgrep:rg file:file)
+PACKAGES=(nodejs:node ripgrep:rg file:file curl:curl)
 [ "$PROVIDER" != local ] || PACKAGES+=(llama-cpp:llama-server)
 for p in "${PACKAGES[@]}"; do
   command -v "${p#*:}" >/dev/null || NEED+=("${p%%:*}")
@@ -76,8 +85,38 @@ done
 [ ${#NEED[@]} -eq 0 ] || { warn "installing ${NEED[*]}"; pkg update -y && pkg install -y "${NEED[@]}"; }
 node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 19) ? 0 : 1)' \
   || fail "Node $(node -v) is too old; run: pkg upgrade nodejs"
-command -v pi >/dev/null || { warn "installing pi"; npm install -g --ignore-scripts @earendil-works/pi-coding-agent; }
-ok "packages, Node $(node -v), pi $(pi --version 2>/dev/null || echo present)"
+ok "packages, Node $(node -v)"
+
+# pi: the managed install keeps its releases under $PI_AGENT_DIR; an npm-installed pi lives elsewhere.
+pi_is_managed() {
+  local found; found=$(command -v pi 2>/dev/null) || return 1
+  case "$(readlink -f "$found")" in "$PI_AGENT_DIR"/*) return 0 ;; *) return 1 ;; esac
+}
+if [ "$UPDATE_PI" -eq 1 ] || ! pi_is_managed; then
+  if command -v pi >/dev/null && ! pi_is_managed; then warn "replacing the npm-installed pi $(pi --version 2>/dev/null) with pi's managed install"; fi
+  PI_INSTALLER="$(mktemp)"
+  trap 'rm -f "$PI_INSTALLER"' EXIT
+  curl -fsSL "$PI_INSTALL_URL" -o "$PI_INSTALLER" || fail "Couldn't download pi's installer from $PI_INSTALL_URL; check the network"
+  # Run it with no terminal attached, so it takes its defaults (install, or replace an npm pi)
+  # instead of waiting for a key, as setup.sh does.
+  node -e '
+    const { spawn } = require("child_process");
+    const child = spawn("sh", [process.argv[1]], { detached: true, stdio: ["ignore", "inherit", "inherit"] });
+    child.on("exit", (code) => process.exit(code ?? 1));' "$PI_INSTALLER" || fail "pi's installer stopped with an error (shown above)"
+  hash -r
+  pi_is_managed || fail "pi installed, but $PI_AGENT_DIR/bin/pi isn't the pi this shell finds ($(command -v pi || echo none))"
+fi
+ok "pi $(pi --version 2>/dev/null | head -n 1) (managed, in $PI_AGENT_DIR)"
+
+# New Termux sessions need to find the managed pi too.
+profile="$HOME/.bashrc"
+case "${SHELL:-}" in */zsh) profile="${ZDOTDIR:-$HOME}/.zshrc" ;; esac
+# shellcheck disable=SC2016 # written to the profile as is, expanded when a new shell starts
+path_line='export PATH="$HOME/.pi/agent/bin:$PATH"'
+if ! grep -Fqx "$path_line" "$profile" 2>/dev/null; then
+  printf '\n# Added by agent-dave android-setup: the managed pi\n%s\n' "$path_line" >> "$profile"
+  ok "added pi to your PATH in $profile (new sessions pick it up)"
+fi
 
 [ -d "$HOME/storage/shared" ] || { warn "accept the Android storage prompt"; termux-setup-storage; sleep 3; }
 mkdir -p "$STATE"

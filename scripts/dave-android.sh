@@ -14,6 +14,8 @@ set -euo pipefail
 
 DAVE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 STATE="$HOME/.dave/android"
+# The managed pi from android-setup.sh, ahead of any older npm-installed one.
+export PATH="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/bin:$PATH"
 HARDWARE="$STATE/hardware.json"
 PIDFILE="$STATE/llm.pid"
 LOG="$STATE/llm.log"

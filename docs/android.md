@@ -33,9 +33,14 @@ Pick [1]:
 the script stops and asks for the flag. With `--provider custom`, `ENDPOINT_NAME`, `ENDPOINT_URL`,
 `ENDPOINT_API_KEY` and `ENDPOINT_MODEL` in the environment answer its questions.
 
-Either way it installs `nodejs`, `ripgrep` and `file` if missing, checks Node 22.19+, installs pi, asks for
+Either way it installs `nodejs`, `ripgrep`, `file` and `curl` if missing, checks Node 22.19+, asks for
 files access, and writes DAVE's choice to `~/.dave/android/hardware.json` and its settings to `config.json`.
 Safe to run again, also to switch between local and an endpoint.
+
+pi comes from pi's own managed installer (`https://pi.dev/install.sh`), as on the desktop, not from
+`npm install -g`, which can hand out an older release. It lives in `~/.pi/agent` (launcher in
+`~/.pi/agent/bin`, added to your PATH in `~/.bashrc`), and an npm-installed pi is replaced once the new one
+passes its check. Re-runs keep the installed pi; `--update-pi` or `pi update` fetches the latest.
 
 ## Start and stop
 
@@ -119,6 +124,7 @@ No tool may read `.env` files or Pi's key files (`auth.json`, `models.json`, `gu
 | pi starts on another model | Start with `dave-android.sh start`, or `/model` and pick DAVE's (`dave-android.sh status` names it). |
 | `there is no local model server` | DAVE uses an endpoint. To go local: `bash scripts/android-setup.sh --provider local`. |
 | `Couldn't connect to that endpoint` | Check the address ends at the API root (often `/v1`) and the key; run setup again. |
+| `pi: command not found`, or an old `pi --version` | Open a new Termux session (or `source ~/.bashrc`) so `~/.pi/agent/bin` comes first; `bash scripts/android-setup.sh --update-pi` reinstalls. |
 | `fetch` MCP server failed at startup | Expected on the phone: it needs `uvx`, which setup doesn't install. |
 
 ## Not yet verified on a device
