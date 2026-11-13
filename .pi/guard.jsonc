@@ -44,6 +44,10 @@
     { "tool": ["dave_implement", "dave_publish_update"], "mode": "ask", "why": "create an isolated writer or publish a reviewed update PR" },
     { "tool": "dave_review", "mode": "ask", "why": "run a read-only reviewer using the configured model provider" },
     { "tool": "dave_task", "mode": "allow", "why": "maintain local task records" },
+    // DAVE's Android file tools (.pi/extensions/android.ts) check their own reach: Termux home plus
+    // the folder you mounted, never .env, .git, .ssh or DAVE's own settings. So only delete asks.
+    { "tool": ["list_dir", "read_file", "search_files", "file_info", "write_file", "edit_file", "move_path"], "mode": "allow", "why": "use DAVE's Android file tools in Termux home or the mounted folder" },
+    { "tool": "delete_path", "mode": "ask", "why": "delete a file or folder on the phone" },
     { "command": "git push", "mode": "never", "why": "push commits" },
     { "command": ["git commit", "npm install", "npm ci", "pip install", "uv add", "uv sync", "pi install"], "mode": "ask", "why": "install dependencies or commit changes" },
     // Never, even if you'd say yes: these need a person at the keyboard.

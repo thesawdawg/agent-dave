@@ -1,25 +1,61 @@
 // DAVE on Android: native file tools, a local LFM2.5 model, and one rule for where files may be reached.
 // Does nothing unless pi runs in Termux on Android, so this repo behaves the same on a desktop.
 //
-// In pi:  /dave:android                  shows the mount and whether delete is on
-//         /dave:android mount <folder>   opens one shared-storage folder (asks you first)
-//         /dave:android unmount          closes it again
-//         /dave:android delete on|off    lets delete_path run, or stops it
-// Set up the phone with scripts/android-setup.sh. Rules and checks live in .pi/lib/android-guard.ts.
-import { readFileSync } from "node:fs";
+// In pi:  /dave:android                       status (the first time: the permissions list too)
+//         /dave:android permissions           what Android, Termux and DAVE need, with live checks
+//         /dave:android mount <folder>        opens one shared-storage folder (asks you first)
+//         /dave:android unmount               closes it again
+//         /dave:android delete on|off         lets delete_path run, or stops it
+//         /dave:android model start|stop|status   the local model server
+// Outside pi: scripts/dave-android.sh start|stop|status|logs. Details: docs/android.md.
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { blockedShellRef, DEFAULT_CONFIG, defaultPlaces, guard, loadConfig, saveConfig, validateMount, type Config } from "../lib/android-guard.ts";
+import { fileURLToPath } from "node:url";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import {
+  blockedShellRef,
+  DEFAULT_CONFIG,
+  defaultPlaces,
+  guard,
+  loadConfig,
+  saveConfig,
+  validateMount,
+  type Access,
+  type Config,
+} from "../lib/android-guard.ts";
+import { permissionsReport } from "../lib/android-permissions.ts";
 import { registerAndroidTools } from "../lib/android-tools.ts";
 
 /** Pi's built-in tools that take a `path` (optional for ls, grep and find, which then use the working folder). */
-const PATH_TOOLS = new Set(["read", "write", "edit", "ls", "grep", "find"]);
-const USAGE = "usage: /dave:android [status | mount <folder> | unmount | delete on|off]";
-
-/** What setup detected about the phone; written by scripts/android-setup.sh. */
-type Hardware = { modelId: string; ctx: number };
+const PATH_TOOLS: Record<string, Access> = { read: "read", ls: "read", grep: "read", find: "read", write: "write", edit: "write" };
+const USAGE = "usage: /dave:android [status | permissions | mount <folder> | unmount | delete on|off | model start|stop|status]";
+const SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "dave-android.sh");
+const WIDGET = "dave-android-permissions";
 
 const isAndroid = (): boolean => process.platform === "android" || (process.env.PREFIX ?? "").includes("com.termux");
+
+const positive = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n > 0;
+
+/** The model server's address from hardware.json (`port`, default 8080). */
+function modelUrl(file: string): string {
+  try {
+    const { port } = JSON.parse(readFileSync(file, "utf8")) as { port?: unknown };
+    return `http://127.0.0.1:${positive(port) ? port : 8080}`;
+  } catch {
+    return "http://127.0.0.1:8080";
+  }
+}
+
+/** The model setup picked, or null when hardware.json is missing, malformed or written with --no-model. */
+function readHardware(file: string): { modelId: string; ctx: number } | null {
+  try {
+    const hw = JSON.parse(readFileSync(file, "utf8")) as { modelId?: unknown; ctx?: unknown };
+    if (typeof hw.modelId !== "string" || !hw.modelId || !positive(hw.ctx)) return null;
+    return { modelId: hw.modelId, ctx: hw.ctx };
+  } catch {
+    return null;
+  }
+}
 
 export default function android(pi: ExtensionAPI): void {
   if (!isAndroid()) return;
@@ -27,12 +63,13 @@ export default function android(pi: ExtensionAPI): void {
   let config: Config = { ...DEFAULT_CONFIG };
   registerAndroidTools(pi, places, () => config);
 
-  // The local model, at the tier the setup script picked. No hardware.json yet: run the setup script.
-  try {
-    const hw = JSON.parse(readFileSync(path.join(places.state, "hardware.json"), "utf8")) as Hardware;
+  const hardware = path.join(places.state, "hardware.json");
+  const url = modelUrl(hardware);
+  const hw = readHardware(hardware);
+  if (hw) {
     pi.registerProvider("dave-local", {
       name: "DAVE local (llama.cpp)",
-      baseUrl: "http://127.0.0.1:8080/v1",
+      baseUrl: `${url}/v1`,
       apiKey: "local",
       api: "openai-completions",
       models: [
@@ -49,22 +86,23 @@ export default function android(pi: ExtensionAPI): void {
         },
       ],
     });
-  } catch {
-    // Not set up yet; the file tools still work with any model.
   }
 
   pi.on("session_start", async (_event, ctx) => {
-    config = await loadConfig(places);
+    const loaded = await loadConfig(places);
+    config = loaded.config;
     ctx.ui.notify(config.mount ? `Android mount: ${config.mount}` : "Android files: Termux home only", "info");
+    if (loaded.problem) ctx.ui.notify(loaded.problem, "warning");
   });
 
   // The same rule for pi's built-in tools. Relative paths resolve against pi's working folder, as pi does.
   pi.on("tool_call", async (event, ctx) => {
     const input = event.input as { path?: unknown; command?: unknown };
-    if (PATH_TOOLS.has(event.toolName)) {
+    const access = PATH_TOOLS[event.toolName];
+    if (access) {
       const target = typeof input.path === "string" ? input.path : ".";
       try {
-        await guard(places, config, target, ctx.cwd);
+        await guard(places, config, target, ctx.cwd, access);
       } catch (e) {
         return { block: true, reason: (e as Error).message };
       }
@@ -76,12 +114,40 @@ export default function android(pi: ExtensionAPI): void {
     return undefined;
   });
 
+  /** Shows the permissions list above the editor; any other /dave:android command closes it. */
+  const showPermissions = async (ctx: ExtensionCommandContext) => {
+    ctx.ui.setWidget(WIDGET, await permissionsReport(places, config, url));
+    try {
+      mkdirSync(places.state, { recursive: true });
+      writeFileSync(path.join(places.state, "permissions-shown"), new Date().toISOString());
+    } catch {
+      // Can't remember it was shown; it will show again next time, which is harmless.
+    }
+  };
+
+  /** Runs scripts/dave-android.sh and reports its last lines. */
+  const model = async (sub: string, ctx: ExtensionCommandContext) => {
+    const args = sub === "start" ? ["serve", "--no-wait"] : [sub];
+    const result = await pi.exec("bash", [SCRIPT, ...args], { cwd: path.dirname(SCRIPT), timeout: 30_000 });
+    const out = `${result.stdout}\n${result.stderr}`.trim().split("\n").slice(-4).join("\n");
+    ctx.ui.notify(out || `dave-android.sh ${args.join(" ")} exited ${result.code}`, result.code === 0 ? "info" : "error");
+  };
+
   pi.registerCommand("dave:android", {
-    description: "Android files: status | mount <folder> | unmount | delete on|off",
+    description: "Android files: status | permissions | mount <folder> | unmount | delete on|off | model start|stop|status",
     handler: async (args, ctx) => {
       const line = String(args ?? "").trim();
       const sub = line.split(/\s+/)[0] || "status";
       const rest = line.slice(sub.length).trim(); // kept whole, so folder names with spaces survive
+      ctx.ui.setWidget(WIDGET, undefined);
+      if (sub === "permissions" || !existsSync(path.join(places.state, "permissions-shown"))) {
+        await showPermissions(ctx);
+        if (sub === "permissions") return;
+      }
+      if (sub === "model") {
+        if (!["start", "stop", "status"].includes(rest)) return ctx.ui.notify("usage: /dave:android model start|stop|status", "error");
+        return model(rest, ctx);
+      }
       if (sub === "mount") {
         if (!ctx.hasUI) return ctx.ui.notify("mount needs you at the screen to confirm", "error");
         const real = await validateMount(places, rest).catch((e: Error) => {

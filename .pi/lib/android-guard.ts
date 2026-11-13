@@ -16,6 +16,9 @@ import { fileURLToPath } from "node:url";
 /** The user's choices, saved in `<state>/config.json`. */
 export type Config = { mount: string | null; allowDelete: boolean; maxReadBytes: number };
 
+/** Whether a call only looks at a path or can change, move or remove it. */
+export type Access = "read" | "write";
+
 /** The fixed places the checks are measured against. Tests pass temporary folders. */
 export type Places = {
   /** Termux home, always reachable. */
@@ -24,28 +27,43 @@ export type Places = {
   shared: string;
   /** Where config.json and hardware.json live. */
   state: string;
-  /** Folders and files no tool may touch, so the model can't change its own permissions. */
-  protectedPaths: string[];
+  /**
+   * Paths no tool may change, move or delete, nor any folder that holds them: DAVE's
+   * permissions, its guard rules and extensions, and Pi's own settings.
+   */
+  writeProtected: string[];
+  /** Files no tool may even read, because they hold keys. */
+  readProtected: string[];
+  /**
+   * Names matched anywhere in a path, as in guard.jsonc's file rules: `read` names may not be
+   * read or changed (.env), `write` names may be read but not changed (.git, .ssh).
+   */
+  protectedNames: { read: string[]; write: string[] };
 };
 
-export const DEFAULT_CONFIG: Config = { mount: null, allowDelete: false, maxReadBytes: 262_144 };
+/** About a quarter of the smallest model's context; setup raises it to match the model it picks. */
+export const DEFAULT_CONFIG: Config = { mount: null, allowDelete: false, maxReadBytes: 8_192 };
 
-/** The places on a real device: Termux home, `/storage/emulated/0`, and this extension's own files. */
+/** The places on a real device: Termux home, `/storage/emulated/0`, and DAVE's own files. */
 export function defaultPlaces(): Places {
   const home = os.homedir();
   const state = path.join(home, ".dave", "android");
-  const lib = path.dirname(fileURLToPath(import.meta.url));
+  const agent = process.env.PI_CODING_AGENT_DIR || path.join(home, ".pi", "agent");
+  const dotPi = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   return {
     home,
     shared: "/storage/emulated/0",
     state,
-    protectedPaths: [
+    writeProtected: [
       state,
-      process.env.PI_CODING_AGENT_DIR || path.join(home, ".pi", "agent"),
-      path.join(lib, "android-guard.ts"),
-      path.join(lib, "android-tools.ts"),
-      path.join(lib, "..", "extensions", "android.ts"),
+      agent,
+      path.join(dotPi, "extensions"),
+      path.join(dotPi, "lib"),
+      path.join(dotPi, "guard.jsonc"),
+      path.join(dotPi, "mcp.json"),
     ],
+    readProtected: ["auth.json", "models.json", "guard-judge.json"].map((f) => path.join(agent, f)),
+    protectedNames: { read: [".env"], write: [".git", ".ssh"] },
   };
 }
 
@@ -68,11 +86,21 @@ export async function realish(p: string): Promise<string> {
   }
 }
 
-/** Expands `~`, `$HOME` and `/sdcard` the way a shell user would mean them. */
+/** Expands `~`, `$HOME`, `$EXTERNAL_STORAGE` and `/sdcard` the way a shell user would mean them. */
 function expand(places: Places, input: string): string {
   return input
-    .replace(/^(~|\$HOME)(?=$|\/)/, places.home)
-    .replace(/^\/sdcard(?=$|\/)/, places.shared);
+    .replace(/^(~|\$HOME|\$\{HOME\})(?=$|\/)/, places.home)
+    .replace(/^(\/sdcard|\/mnt\/sdcard|\$EXTERNAL_STORAGE|\$\{EXTERNAL_STORAGE\})(?=$|\/)/, places.shared);
+}
+
+/** Turns a filesystem error into something the user can act on. */
+function explain(e: unknown, input: string): Error {
+  const code = (e as NodeJS.ErrnoException).code;
+  if (code === "EACCES" || code === "EPERM") {
+    return new Error("Termux can't open shared storage: run termux-setup-storage and allow access, then try again");
+  }
+  if (code === "ENOENT") return new Error(`no such folder in shared storage: ${input}`);
+  return e instanceof Error ? e : new Error(String(e));
 }
 
 /**
@@ -83,34 +111,54 @@ function expand(places: Places, input: string): string {
 export async function validateMount(places: Places, input: string): Promise<string> {
   const expanded = expand(places, input.trim());
   const target = path.isAbsolute(expanded) ? expanded : path.join(places.shared, expanded);
-  const shared = await fs.realpath(places.shared);
-  const real = await fs.realpath(target);
-  if (!inside(real, shared) || real === shared) {
-    throw new Error("mount must be one folder inside shared storage, not all of it");
+  let shared: string, real: string;
+  try {
+    shared = await fs.realpath(places.shared);
+    real = await fs.realpath(target);
+    if (!inside(real, shared) || real === shared) throw new Error("mount must be one folder inside shared storage, not all of it");
+    if (!(await fs.stat(real)).isDirectory()) throw new Error("mount must be a folder");
+    await fs.access(real, constants.R_OK | constants.W_OK);
+  } catch (e) {
+    throw explain(e, input);
   }
-  if (!(await fs.stat(real)).isDirectory()) throw new Error("mount must be a folder");
-  await fs.access(real, constants.R_OK | constants.W_OK);
   return real;
 }
 
-/** Reads config.json. A saved mount that no longer passes validateMount is dropped, not trusted. */
-export async function loadConfig(places: Places): Promise<Config> {
-  let raw: Partial<Config> = {};
+/** A loaded config, plus the reason a saved mount was set aside, if one was. */
+export type Loaded = { config: Config; problem: string | null };
+
+/**
+ * Reads config.json. A saved mount that no longer passes validateMount is set aside, never
+ * trusted, and `problem` says why so the user can be told.
+ */
+export async function loadConfig(places: Places): Promise<Loaded> {
+  let raw: Record<string, unknown> = {};
   try {
-    raw = JSON.parse(await fs.readFile(path.join(places.state, "config.json"), "utf8")) as Partial<Config>;
+    const parsed: unknown = JSON.parse(await fs.readFile(path.join(places.state, "config.json"), "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) raw = parsed as Record<string, unknown>;
   } catch {
     // Missing or unreadable config: start from the defaults.
   }
-  const mount = typeof raw.mount === "string" ? await validateMount(places, raw.mount).catch(() => null) : null;
+  let mount: string | null = null;
+  let problem: string | null = null;
+  if (typeof raw.mount === "string") {
+    try {
+      mount = await validateMount(places, raw.mount);
+    } catch (e) {
+      problem = `saved mount ${raw.mount} is closed for now: ${(e as Error).message}`;
+    }
+  }
   const n = raw.maxReadBytes;
   const maxReadBytes = typeof n === "number" && Number.isInteger(n) && n > 0 ? n : DEFAULT_CONFIG.maxReadBytes;
-  return { mount, allowDelete: raw.allowDelete === true, maxReadBytes };
+  return { config: { mount, allowDelete: raw.allowDelete === true, maxReadBytes }, problem };
 }
 
 /** Writes config.json, readable only by this user. */
 export async function saveConfig(places: Places, config: Config): Promise<void> {
   await fs.mkdir(places.state, { recursive: true });
-  await fs.writeFile(path.join(places.state, "config.json"), JSON.stringify(config, null, 2), { mode: 0o600 });
+  const file = path.join(places.state, "config.json");
+  await fs.writeFile(file, JSON.stringify(config, null, 2), { mode: 0o600 });
+  await fs.chmod(file, 0o600);
 }
 
 /** The real paths of every reachable place: home, plus the mount when one is set. */
@@ -121,13 +169,28 @@ export async function roots(places: Places, config: Config): Promise<string[]> {
 }
 
 /**
- * Resolves `input` (relative to `cwd`) and returns its real path if a tool may use it.
+ * Resolves `input` (relative to `cwd`) and returns its real path if a tool may use it that way.
  * Throws with a message the model can pass on to the user otherwise.
  */
-export async function guard(places: Places, config: Config, input: string, cwd: string = places.home): Promise<string> {
+export async function guard(
+  places: Places,
+  config: Config,
+  input: string,
+  cwd: string = places.home,
+  access: Access = "read",
+): Promise<string> {
   const real = await realish(path.resolve(cwd, expand(places, input)));
-  for (const p of places.protectedPaths) {
-    if (inside(real, await realish(p))) throw new Error(`protected DAVE/Pi path: ${input}`);
+  const parts = real.split(path.sep);
+  const names = access === "write" ? [...places.protectedNames.read, ...places.protectedNames.write] : places.protectedNames.read;
+  if (names.some((n) => parts.includes(n))) throw new Error(`protected path (${names.filter((n) => parts.includes(n)).join(", ")}): ${input}`);
+  for (const p of places.readProtected) {
+    if (real === (await realish(p))) throw new Error(`protected DAVE/Pi path: ${input}`);
+  }
+  if (access === "write") {
+    for (const p of places.writeProtected) {
+      const guarded = await realish(p);
+      if (inside(real, guarded) || inside(guarded, real)) throw new Error(`protected DAVE/Pi path: ${input}`);
+    }
   }
   for (const root of await roots(places, config)) if (inside(real, root)) return real;
   throw new Error(
@@ -138,12 +201,12 @@ export async function guard(places: Places, config: Config, input: string, cwd: 
 }
 
 /**
- * Shared-storage paths written out in a shell command: the `~/storage/*` links
- * termux-setup-storage makes, `$HOME/storage/*`, `/sdcard` and `/storage/...`.
+ * Shared-storage paths written out in a shell command: anything under `~/storage` or
+ * `$HOME/storage`, `$EXTERNAL_STORAGE`, `/sdcard` and any `/storage/...` path (SD cards too).
  * Best effort only: a determined command can still get around a text check.
  */
 const SHARED_REF =
-  /(?:(?:~|\$HOME)\/storage\/(?:shared|downloads|dcim|pictures|music|movies)|\/sdcard|\/storage\/(?:emulated\/0|self\/primary))[^\s'";|&)]*/g;
+  /(?<=^|[\s'"=:(<>])(?:(?:~|\$HOME|\$\{HOME\})\/storage\/|\$EXTERNAL_STORAGE|\$\{EXTERNAL_STORAGE\}|\/mnt\/sdcard|\/sdcard|\/storage\/)[^\s'";|&)]*/g;
 
 /** Returns the first shared-storage path in `command` that the guard refuses, or null. */
 export async function blockedShellRef(places: Places, config: Config, command: string): Promise<string | null> {

@@ -23,6 +23,7 @@ Guard defaults, using built-in Pi MCP. See [implementation and remaining checks]
 | Safety interlock | Checks every tool call against your rules before it runs | `.pi/extensions/guard.ts`, rules in `.pi/guard.jsonc` |
 | Black box | Every session, step by step | `/tree`, `/export` in pi |
 | Fleet antenna | Worker DAVEs for a crew | `.pi/agents/*.md` (needs pi-subagents) |
+| Pocket mode | DAVE on an Android phone with a local model | `.pi/extensions/android.ts`, see [docs/android.md](docs/android.md) |
 
 ### Skills
 - **meeting-notes:** turns rough notes into minutes with decisions and action items.
