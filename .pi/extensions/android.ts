@@ -18,6 +18,7 @@ import {
   defaultPlaces,
   guard,
   loadConfig,
+  reachNote,
   saveConfig,
   validateMount,
   type Access,
@@ -93,6 +94,12 @@ export default function android(pi: ExtensionAPI): void {
     config = loaded.config;
     ctx.ui.notify(config.mount ? `Android mount: ${config.mount}` : "Android files: Termux home only", "info");
     if (loaded.problem) ctx.ui.notify(loaded.problem, "warning");
+  });
+
+  // Tell the model, on every turn, exactly where its tools reach (the mount can change between turns).
+  pi.on("before_agent_start", async (event) => {
+    event.systemPromptOptions.sections.android_files = reachNote(places, config);
+    return undefined;
   });
 
   // The same rule for pi's built-in tools. Relative paths resolve against pi's working folder, as pi does.

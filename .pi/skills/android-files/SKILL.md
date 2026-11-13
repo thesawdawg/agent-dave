@@ -6,7 +6,8 @@ description: Read, search and edit files on an Android phone with DAVE's file to
 # Android files
 
 - Use list_dir or search_files first, then read_file. Change files with edit_file; use write_file for new files.
-- You can reach Termux home, plus one Android folder if the user has mounted it. Shared storage is otherwise closed.
+- You can reach Termux home, plus one Android folder if the user has mounted it. Your instructions name both exact paths: use them. Searching or listing home does not reach the mounted folder, so go to it directly. Shared storage is otherwise closed.
+- In list_dir, `l` entries are links (Termux's `~/storage/*`); the `->` shows where they lead.
 - On an "outside Termux home" error, tell the user they can run `/dave:android mount <folder>`. Never try another route, including bash.
 - A "protected DAVE/Pi path" error means the file controls your own permissions. Leave it alone and tell the user.
 - delete_path is off unless the user runs `/dave:android delete on`.

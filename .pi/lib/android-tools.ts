@@ -9,7 +9,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type, type Static, type TSchema } from "typebox";
-import { guard, roots, type Access, type Config, type Places } from "./android-guard.ts";
+import { guard, inside, roots, type Access, type Config, type Places } from "./android-guard.ts";
 
 const run = promisify(execFile);
 const text = (description: string) => Type.String({ description });
@@ -71,17 +71,27 @@ export function registerAndroidTools(pi: ExtensionAPI, places: Places, config: (
     });
   };
 
-  tool("list_dir", "List", `List a folder: type, size, modified, name (first ${MAX_LIST}).`, Type.Object({ path: text("folder") }), async (a, { resolve }) => {
-    const dir = await resolve(a.path);
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    const lines: string[] = [];
-    for (const entry of entries.slice(0, MAX_LIST)) {
-      const st = await fs.stat(path.join(dir, entry.name)).catch(() => null);
-      lines.push(`${entry.isDirectory() ? "d" : "f"}  ${st?.size ?? "?"}  ${st?.mtime.toISOString().slice(0, 16) ?? ""}  ${entry.name}`);
-    }
-    if (entries.length > MAX_LIST) lines.push(`[${entries.length - MAX_LIST} more; use search_files to narrow]`);
-    return lines.join("\n") || "(empty)";
-  });
+  tool(
+    "list_dir",
+    "List",
+    `List a folder: type (d folder, f file, l link), size, modified, name (first ${MAX_LIST}).`,
+    Type.Object({ path: text("folder") }),
+    async (a, { resolve }) => {
+      const dir = await resolve(a.path);
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      const lines: string[] = [];
+      for (const entry of entries.slice(0, MAX_LIST)) {
+        const full = path.join(dir, entry.name);
+        const st = await fs.stat(full).catch(() => null); // follows links, so a link to a folder reads as one
+        const kind = entry.isSymbolicLink() ? "l" : entry.isDirectory() ? "d" : "f";
+        // Termux's ~/storage/* are links into shared storage: show where they go, so the model can follow them.
+        const target = entry.isSymbolicLink() ? ` -> ${await fs.realpath(full).catch(() => fs.readlink(full).catch(() => "?"))}${st?.isDirectory() ? "/" : ""}` : "";
+        lines.push(`${kind}  ${st?.size ?? "?"}  ${st?.mtime.toISOString().slice(0, 16) ?? ""}  ${entry.name}${target}`);
+      }
+      if (entries.length > MAX_LIST) lines.push(`[${entries.length - MAX_LIST} more; use search_files to narrow]`);
+      return lines.join("\n") || "(empty)";
+    },
+  );
 
   tool(
     "read_file",
@@ -175,7 +185,7 @@ export function registerAndroidTools(pi: ExtensionAPI, places: Places, config: (
     "Search",
     "ripgrep: mode 'content' (regex) or 'name' (glob).",
     Type.Object({ path: text("folder"), pattern: text("regex or glob"), mode: Type.Optional(text("content | name")) }),
-    async (a, { resolve, signal }) => {
+    async (a, { cfg, resolve, signal }) => {
       const dir = await resolve(a.path);
       const args = a.mode === "name" ? ["--files", "-g", a.pattern, dir] : ["-n", "--max-count", "5", "-e", a.pattern, dir];
       const { stdout } = await run("rg", args, { maxBuffer: 4 << 20, timeout: SEARCH_TIMEOUT_MS, signal }).catch(
@@ -188,7 +198,9 @@ export function registerAndroidTools(pi: ExtensionAPI, places: Places, config: (
         },
       );
       const lines = stdout.split("\n").filter(Boolean);
-      if (!lines.length) return "no matches";
+      // Searches don't follow links, so searching home never reaches the mount: say where it is.
+      const mountHint = cfg.mount && !inside(dir, cfg.mount) ? ` (the mounted folder ${cfg.mount} is outside this search; search it directly)` : "";
+      if (!lines.length) return `no matches${mountHint}`;
       return lines.slice(0, MAX_MATCHES).map(clip).join("\n") + (lines.length > MAX_MATCHES ? `\n[${lines.length - MAX_MATCHES} more]` : "");
     },
   );

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
-import {blockedShellRef, DEFAULT_CONFIG, guard, loadConfig, validateMount} from '../.pi/lib/android-guard.ts';
+import {blockedShellRef, DEFAULT_CONFIG, guard, loadConfig, reachNote, validateMount} from '../.pi/lib/android-guard.ts';
 
 /** A fake phone: Termux home with termux-setup-storage's links, shared storage beside it, and DAVE's protected files. */
 function phone() {
@@ -45,7 +45,16 @@ test('mount: one folder inside shared storage, never all of it', async () => {
   assert.equal(mount, path.join(shared, 'Docs'));
   const config = {...cfg(), mount};
   assert.equal(await guard(places, config, '~/storage/shared/Docs/a.txt'), path.join(shared, 'Docs', 'a.txt'));
+  assert.equal(await guard(places, config, '~/storage/emulated/0/Docs/a.txt'), path.join(shared, 'Docs', 'a.txt'), 'common mix-up of the two forms');
   await refused(guard(places, config, '~/storage/downloads/b.txt'));
+});
+
+test('the model is told the exact mounted path, its other names, and that home searches miss it', async () => {
+  const {places, shared} = phone();
+  const mount = path.join(shared, 'Docs');
+  const note = reachNote(places, {...cfg(), mount});
+  for (const want of [mount, '~/storage/shared/Docs', '/sdcard/Docs', 'does not reach the mounted folder']) assert.ok(note.includes(want), want);
+  assert.match(reachNote(places, cfg()), /No shared-storage folder is mounted/);
 });
 
 test('the model cannot change its own permissions, even by moving a folder that holds them', async () => {

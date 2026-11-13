@@ -86,9 +86,13 @@ export async function realish(p: string): Promise<string> {
   }
 }
 
-/** Expands `~`, `$HOME`, `$EXTERNAL_STORAGE` and `/sdcard` the way a shell user would mean them. */
+/**
+ * Expands `~`, `$HOME`, `$EXTERNAL_STORAGE` and `/sdcard` the way a shell user would mean them.
+ * `~/storage/emulated/0` (a common mix-up of `~/storage/shared` and `/storage/emulated/0`) means shared storage.
+ */
 function expand(places: Places, input: string): string {
   return input
+    .replace(/^(~|\$HOME|\$\{HOME\})\/storage\/emulated\/0(?=$|\/)/, places.shared)
     .replace(/^(~|\$HOME|\$\{HOME\})(?=$|\/)/, places.home)
     .replace(/^(\/sdcard|\/mnt\/sdcard|\$EXTERNAL_STORAGE|\$\{EXTERNAL_STORAGE\})(?=$|\/)/, places.shared);
 }
@@ -159,6 +163,29 @@ export async function saveConfig(places: Places, config: Config): Promise<void> 
   const file = path.join(places.state, "config.json");
   await fs.writeFile(file, JSON.stringify(config, null, 2), { mode: 0o600 });
   await fs.chmod(file, 0o600);
+}
+
+/**
+ * What the model is told on every turn about where its file tools reach. Without it a small
+ * model only knows "home plus a mount, maybe" and never finds the mounted folder.
+ */
+export function reachNote(places: Places, config: Config): string {
+  const lines = [`DAVE on Android. Your file tools reach only these places:`, `- Termux home: ${places.home} (also ~).`];
+  if (config.mount) {
+    const rel = path.relative(places.shared, config.mount);
+    const aliases = rel && !rel.startsWith("..") ? ` It is also ~/storage/shared/${rel} and /sdcard/${rel}.` : "";
+    lines.push(
+      `- The mounted shared-storage folder: ${config.mount}.${aliases} Use this exact path, e.g. list_dir "${config.mount}".`,
+      "- Searching or listing Termux home does not reach the mounted folder: search or list it directly.",
+      "- Nothing else in shared storage is reachable.",
+    );
+  } else {
+    lines.push(
+      "- No shared-storage folder is mounted. If the user wants phone files outside Termux home, tell them to run",
+      "  /dave:android mount <folder>. Don't look for another way in.",
+    );
+  }
+  return lines.join("\n");
 }
 
 /** The real paths of every reachable place: home, plus the mount when one is set. */
