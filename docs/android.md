@@ -8,6 +8,8 @@ on a desktop it does nothing.
 Android is an add-on: DAVE is a computer agent first (Linux-first, with macOS and Windows supported),
 and the phone runs the same repo in Termux. iOS is not planned.
 
+Architecture walkthrough: [android-architecture.html](android-architecture.html).
+
 ## Set up (once)
 
 Install Termux from [F-Droid or GitHub](https://github.com/termux/termux-app#installation) (not Google Play), clone this repo inside Termux, then:

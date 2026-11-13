@@ -1,0 +1,849 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAVE on Android — architecture walkthrough</title>
+<script>
+  // Nice-to-have only: restores a saved theme choice before first paint.
+  try { const t = localStorage.getItem("dave-arch-theme"); if (t) document.documentElement.dataset.theme = t; } catch {}
+</script>
+<style>
+  :root {
+    --bg: #f6f5f1; --fg: #20242a; --muted: #5c616b; --card: #ffffff;
+    --border: #d9d6cc; --accent: #0b6bcb; --accent-soft: #e5effb;
+    --ok: #1c7a3d; --ok-soft: #e3f2e7; --warn: #9a6200; --bad: #b3261e; --bad-soft: #fbe7e5;
+    --lane: #efeee7; --arrow: #7d838d; --code-bg: #edece6; --hl: #fff3c2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16181c; --fg: #e4e2dc; --muted: #9aa0ab; --card: #1f2228;
+      --border: #3a3e47; --accent: #6db3f2; --accent-soft: #1d2f42;
+      --ok: #7cc98f; --ok-soft: #1d3024; --warn: #e0b15e; --bad: #ef8f88; --bad-soft: #3a2224;
+      --lane: #1b1d22; --arrow: #6b7078; --code-bg: #23262c; --hl: #3d3620;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16181c; --fg: #e4e2dc; --muted: #9aa0ab; --card: #1f2228;
+    --border: #3a3e47; --accent: #6db3f2; --accent-soft: #1d2f42;
+    --ok: #7cc98f; --ok-soft: #1d3024; --warn: #e0b15e; --bad: #ef8f88; --bad-soft: #3a2224;
+    --lane: #1b1d22; --arrow: #6b7078; --code-bg: #23262c; --hl: #3d3620;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  code, .mono { font: 0.88em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 4px; }
+  a { color: var(--accent); }
+  a code { background: none; padding: 0; font-size: 0.92em; }
+
+  header.pagehead {
+    border-bottom: 1px solid var(--border); padding: 1.2rem 1.4rem;
+    display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
+  }
+  header.pagehead h1 { font-size: 1.3rem; margin: 0; }
+  header.pagehead p { margin: 0; color: var(--muted); font-size: 0.9rem; flex: 1; min-width: 16rem; }
+  #themeBtn {
+    border: 1px solid var(--border); background: var(--card); color: var(--fg);
+    border-radius: 6px; padding: 0.3rem 0.7rem; cursor: pointer; font: inherit; font-size: 0.85rem;
+  }
+  #themeBtn[hidden] { display: none; }
+
+  .wrap { display: flex; max-width: 1280px; margin: 0 auto; gap: 2rem; padding: 0 1.2rem; }
+  nav.toc {
+    position: sticky; top: 0; align-self: flex-start; flex: 0 0 215px;
+    height: 100vh; overflow-y: auto; padding: 1rem 0;
+  }
+  nav.toc ol { list-style: none; margin: 0; padding: 0; counter-reset: sec; }
+  nav.toc a {
+    display: block; padding: 0.28rem 0.5rem; color: var(--muted); text-decoration: none;
+    border-left: 2px solid var(--border); font-size: 0.9rem;
+  }
+  nav.toc a.active { color: var(--fg); border-left-color: var(--accent); background: var(--accent-soft); }
+  nav.toc a:hover { color: var(--fg); }
+
+  main { flex: 1; min-width: 0; padding: 0.5rem 0 4rem; }
+  section { padding-top: 1.6rem; }
+  h2 { font-size: 1.15rem; border-bottom: 1px solid var(--border); padding-bottom: 0.35rem; }
+  h3 { font-size: 0.98rem; margin-bottom: 0.3rem; }
+  p, li { max-width: 70ch; }
+  .muted { color: var(--muted); }
+
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; font-size: 0.92rem; }
+  th, td { border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: var(--lane); }
+  td code { white-space: nowrap; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 0.8rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 0.7rem 0.9rem; }
+  .card h3 { margin: 0 0 0.25rem; }
+  .card p { margin: 0.2rem 0; font-size: 0.92rem; }
+
+  figure { margin: 1rem 0; }
+  figcaption { font-size: 0.85rem; color: var(--muted); margin-top: 0.3rem; }
+  .diagram { display: block; width: 100%; height: auto; background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
+  .diagram text { font-family: inherit; fill: var(--fg); font-size: 12.5px; }
+  .diagram .s { fill: var(--muted); font-size: 10.5px; }
+  .diagram .b { font-weight: 600; }
+  .diagram .lane { fill: var(--lane); stroke: var(--border); }
+  .diagram .lt { fill: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.07em; }
+  .diagram .box { fill: var(--bg); stroke: var(--border); }
+  .diagram .open { fill: var(--ok-soft); stroke: var(--ok); }
+  .diagram .closed { fill: var(--bad-soft); stroke: var(--bad); }
+  .diagram .decision { fill: var(--accent-soft); stroke: var(--accent); }
+  .diagram .edge { stroke: var(--arrow); stroke-width: 1.4; fill: none; }
+  .diagram .dashed { stroke-dasharray: 5 4; }
+  .diagram .elabel { fill: var(--muted); font-size: 10.5px; }
+  .diagram .life { stroke: var(--border); stroke-dasharray: 4 4; }
+  .ah { fill: var(--arrow); }
+
+  @media (max-width: 880px) {
+    .wrap { flex-direction: column; gap: 0; }
+    nav.toc {
+      position: sticky; top: 0; z-index: 5; flex: none; width: auto; height: auto;
+      background: var(--bg); border-bottom: 1px solid var(--border); padding: 0.3rem 0;
+    }
+    nav.toc ol { display: flex; overflow-x: auto; gap: 0.2rem; }
+    nav.toc a { border-left: none; border-bottom: 2px solid var(--border); white-space: nowrap; }
+    nav.toc a.active { border-bottom-color: var(--accent); }
+  }
+</style>
+</head>
+<body>
+
+<header class="pagehead">
+  <h1>DAVE on Android — architecture walkthrough</h1>
+  <p>How the <code>/dave:android</code> add-on is put together: scripts, the pi extension, the reach rule, and the model. Every claim here is read from the code it links to.</p>
+  <button id="themeBtn" hidden>theme: auto</button>
+</header>
+
+<div class="wrap">
+<nav class="toc" aria-label="Sections">
+  <ol>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#map">Component map</a></li>
+    <li><a href="#setup">Setup flow</a></li>
+    <li><a href="#lifecycle">Start and stop</a></li>
+    <li><a href="#boot">Extension boot and hooks</a></li>
+    <li><a href="#reach">The reach rule</a></li>
+    <li><a href="#toolcall">A tool call, end to end</a></li>
+    <li><a href="#tools">Tools</a></li>
+    <li><a href="#providers">Model providers</a></li>
+    <li><a href="#commands">Commands</a></li>
+    <li><a href="#decisions">Design decisions</a></li>
+    <li><a href="#tests">Tests and limits</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="overview">
+  <h2>1. Overview</h2>
+  <p>DAVE is a computer agent first — Linux-first, with macOS and Windows supported. Android is an
+  add-on: the same repo runs inside Termux on the phone, and iOS is not planned. Nothing Android-specific
+  happens off the phone: the extension returns immediately unless
+  <code>process.platform === "android"</code> or <code>$PREFIX</code> contains <code>com.termux</code>
+  (<a href="../.pi/extensions/android.ts"><code>isAndroid()</code></a>).</p>
+  <p>Three pillars hold it up:</p>
+  <ul>
+    <li><strong>Native file tools with one reach rule.</strong> Eight tools in
+      <a href="../.pi/lib/android-tools.ts"><code>.pi/lib/android-tools.ts</code></a>, all gated by
+      <a href="../.pi/lib/android-guard.ts"><code>.pi/lib/android-guard.ts</code></a>: Termux home is always
+      reachable, plus at most one shared-storage folder the user mounts.</li>
+    <li><strong>A model.</strong> Either llama.cpp's <code>llama-server</code> on the phone itself
+      (provider <code>dave-local</code>), or any OpenAI-compatible endpoint — including an app on the
+      same phone (loopback) or a remote one.</li>
+    <li><strong>Shell scripts for setup and lifecycle.</strong>
+      <a href="../scripts/android-setup.sh"><code>scripts/android-setup.sh</code></a> installs and
+      configures; <a href="../scripts/dave-android.sh"><code>scripts/dave-android.sh</code></a> starts,
+      serves, stops and reports.</li>
+  </ul>
+</section>
+
+<section id="map">
+  <h2>2. Component map</h2>
+  <svg class="diagram" viewBox="0 0 1180 545" role="img" aria-label="Component map: shell scripts, state on disk, pi internals, and the model">
+    <defs>
+      <marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+    </defs>
+
+    <rect class="lane" x="12" y="8" width="1156" height="118" rx="8"/>
+    <text class="lt" x="24" y="28">SHELL — THE SCRIPTS YOU RUN (OUTSIDE PI)</text>
+    <rect class="box" x="40" y="44" width="240" height="64" rx="6"/>
+    <text class="b" x="52" y="66">android-setup.sh</text>
+    <text class="s" x="52" y="82">provider, packages, pi,</text>
+    <text class="s" x="52" y="96">model choice, state files</text>
+    <rect class="box" x="310" y="44" width="240" height="64" rx="6"/>
+    <text class="b" x="322" y="66">connect.mjs --custom</text>
+    <text class="s" x="322" y="82">endpoint → provider in models.json,</text>
+    <text class="s" x="322" y="96">result file for setup</text>
+    <rect class="box" x="580" y="44" width="240" height="64" rx="6"/>
+    <text class="b" x="592" y="66">dave-android.sh</text>
+    <text class="s" x="592" y="82">start · serve · stop · status · logs</text>
+    <text class="s" x="592" y="96">lifecycle of llama-server + pi</text>
+
+    <rect class="lane" x="12" y="134" width="1156" height="116" rx="8"/>
+    <text class="lt" x="24" y="154">STATE ON DISK (UNDER TERMUX HOME)</text>
+    <rect class="box" x="40" y="170" width="340" height="64" rx="6"/>
+    <text class="b" x="52" y="186">~/.dave/android/</text>
+    <text class="s" x="52" y="200">hardware.json · config.json (0600) · llm.pid ·</text>
+    <text class="s" x="52" y="213">llm.log (.1 past 5MB) · wakelock ·</text>
+    <text class="s" x="52" y="226">permissions-shown · endpoint.json (setup only)</text>
+    <rect class="box" x="420" y="170" width="210" height="64" rx="6"/>
+    <text class="b" x="432" y="192">~/.pi/agent/models.json</text>
+    <text class="s" x="432" y="208">saved providers</text>
+    <text class="s" x="432" y="222">(custom endpoint lives here)</text>
+    <rect class="box" x="660" y="170" width="220" height="64" rx="6"/>
+    <text class="b" x="672" y="192">~/.pi/agent/bin</text>
+    <text class="s" x="672" y="208">the managed pi launcher,</text>
+    <text class="s" x="672" y="222">first on PATH</text>
+
+    <rect class="lane" x="12" y="258" width="1156" height="152" rx="8"/>
+    <text class="lt" x="24" y="278">INSIDE PI</text>
+    <rect class="box" x="40" y="296" width="190" height="96" rx="6"/>
+    <text class="b" x="52" y="320">extensions/android.ts</text>
+    <text class="s" x="52" y="336">entry: registers tools,</text>
+    <text class="s" x="52" y="349">provider, hooks and</text>
+    <text class="s" x="52" y="362">/dave:android</text>
+    <rect class="box" x="270" y="296" width="210" height="44" rx="6"/>
+    <text class="b" x="282" y="314">lib/android-guard.ts</text>
+    <text class="s" x="282" y="329">reach rule · config · note · bash check</text>
+    <rect class="box" x="270" y="348" width="210" height="44" rx="6"/>
+    <text class="b" x="282" y="366">lib/android-tools.ts</text>
+    <text class="s" x="282" y="381">the 8 file tools</text>
+    <rect class="box" x="510" y="296" width="220" height="44" rx="6"/>
+    <text class="b" x="522" y="314">lib/android-permissions.ts</text>
+    <text class="s" x="522" y="329">report · isLoopback · live checks</text>
+    <rect class="box" x="510" y="348" width="220" height="44" rx="6"/>
+    <text class="b" x="522" y="366">skills/android-files/SKILL.md</text>
+    <text class="s" x="522" y="381">guidance that reaches the prompt</text>
+    <rect class="box" x="760" y="296" width="170" height="44" rx="6"/>
+    <text class="b" x="772" y="314">extensions/guard.ts</text>
+    <text class="s" x="772" y="329">the repo-wide guard</text>
+    <rect class="box" x="760" y="348" width="170" height="44" rx="6"/>
+    <text class="b" x="772" y="366">.pi/guard.jsonc</text>
+    <text class="s" x="772" y="381">tools: allow · delete_path: ask</text>
+
+    <rect class="lane" x="12" y="418" width="1156" height="116" rx="8"/>
+    <text class="lt" x="24" y="438">MODEL — WHOEVER SERVES THE /v1 API</text>
+    <rect class="box" x="830" y="456" width="300" height="60" rx="6"/>
+    <text class="b" x="842" y="478">llama-server · 127.0.0.1:&lt;port&gt;</text>
+    <text class="s" x="842" y="493">provider "dave-local" · port from</text>
+    <text class="s" x="842" y="506">hardware.json, default 8080</text>
+    <rect class="box" x="480" y="456" width="320" height="60" rx="6"/>
+    <text class="b" x="492" y="478">a custom endpoint</text>
+    <text class="s" x="492" y="493">an app on this phone (loopback),</text>
+    <text class="s" x="492" y="506">or a remote server</text>
+
+    <!-- edges -->
+    <path class="edge" d="M280,76 H310" marker-end="url(#ah1)"/>
+    <text class="elabel" x="284" y="70">runs</text>
+
+    <path class="edge" d="M110,108 V170" marker-end="url(#ah1)"/>
+    <text class="elabel" x="118" y="144">writes</text>
+
+    <path class="edge" d="M160,44 V36 H860 V170" marker-end="url(#ah1)"/>
+    <text class="elabel" x="500" y="32">managed install (pi.dev/install.sh)</text>
+
+    <path class="edge" d="M430,108 V136 H525 V170" marker-end="url(#ah1)"/>
+    <text class="elabel" x="438" y="130">writes provider</text>
+
+    <path class="edge" d="M700,108 V150 H370 V170" marker-end="url(#ah1)"/>
+    <text class="elabel" x="705" y="146">reads · writes</text>
+
+    <path class="edge" d="M820,60 H990 V456" marker-end="url(#ah1)"/>
+    <text class="elabel" x="996" y="280">starts / stops</text>
+
+    <path class="edge" d="M820,92 H1060 V300" marker-end="url(#ah1)"/>
+    <text class="elabel" x="1066" y="200">exec pi --model</text>
+
+    <path class="edge" d="M135,296 V234" marker-end="url(#ah1)"/>
+    <text class="elabel" x="143" y="268">reads · writes</text>
+
+    <path class="edge" d="M230,318 H270" marker-end="url(#ah1)"/>
+    <path class="edge" d="M230,370 H270" marker-end="url(#ah1)"/>
+    <path class="edge" d="M180,296 V282 H620 V296" marker-end="url(#ah1)"/>
+    <text class="elabel" x="380" y="278">imports</text>
+
+    <path class="edge" d="M845,340 V348" marker-end="url(#ah1)"/>
+    <text class="elabel" x="938" y="346">reads rules</text>
+
+    <path class="edge" d="M640,410 V456" marker-end="url(#ah1)"/>
+    <text class="elabel" x="648" y="436">/v1</text>
+    <path class="edge" d="M900,410 V456" marker-end="url(#ah1)"/>
+    <text class="elabel" x="906" y="436">/v1</text>
+  </svg>
+  <figcaption>Arrows point from the actor to what it touches. Both <code>/v1</code> arrows are pi talking to the model over the OpenAI API.</figcaption>
+
+  <h3>Who writes and reads what</h3>
+  <div class="tablewrap"><table>
+    <tr><th>File</th><th>Written by</th><th>Read by</th></tr>
+    <tr><td><code>~/.dave/android/hardware.json</code></td><td><code>android-setup.sh</code> (provider, modelId, model, ctx, threads, port, endpoint)</td><td><code>dave-android.sh</code> (serve/start/status), <code>android.ts</code> (readChoice, modelUrl)</td></tr>
+    <tr><td><code>~/.dave/android/config.json</code> (0600)</td><td><code>android-setup.sh</code> (refreshes only <code>maxReadBytes</code>), <code>android.ts</code> via <code>saveConfig</code> (mount, unmount, delete)</td><td><code>android.ts</code> via <code>loadConfig</code>, <code>dave-android.sh status</code></td></tr>
+    <tr><td><code>~/.dave/android/llm.pid</code>, <code>llm.log</code></td><td><code>dave-android.sh serve</code> (log rotates to <code>llm.log.1</code> past 5&nbsp;MB)</td><td><code>dave-android.sh serve/stop/status/logs</code></td></tr>
+    <tr><td><code>~/.dave/android/wakelock</code></td><td><code>dave-android.sh serve</code> (marker file next to <code>termux-wake-lock</code>)</td><td><code>dave-android.sh stop/status</code>, the permissions report</td></tr>
+    <tr><td><code>~/.dave/android/permissions-shown</code></td><td><code>android.ts</code> (first time the report is shown)</td><td><code>android.ts</code> (skips showing it again)</td></tr>
+    <tr><td><code>~/.dave/android/endpoint.json</code></td><td><code>connect.mjs --custom --result</code> during setup</td><td><code>android-setup.sh</code>, then deleted</td></tr>
+    <tr><td><code>~/.pi/agent/models.json</code></td><td><code>connect.mjs --custom</code> (a provider block with baseUrl, apiKey, models)</td><td>pi (providers), <code>connect.mjs</code></td></tr>
+    <tr><td><code>~/.pi/agent/bin</code></td><td>pi's managed installer (<code>PI_INSTALL_URL</code>, default <code>pi.dev/install.sh</code>)</td><td>PATH — both scripts put it first</td></tr>
+  </table></div>
+</section>
+
+<section id="setup">
+  <h2>3. Setup flow — <a href="../scripts/android-setup.sh"><code>scripts/android-setup.sh</code></a></h2>
+  <svg class="diagram" viewBox="0 0 780 930" role="img" aria-label="Flowchart of android-setup.sh">
+    <defs>
+      <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+    </defs>
+
+    <rect class="box" x="230" y="14" width="320" height="46" rx="6"/>
+    <text class="b" x="390" y="33" text-anchor="middle">parse flags</text>
+    <text class="s" x="390" y="48" text-anchor="middle">--provider · --model · --ctx · --threads · --port · --update-pi</text>
+
+    <path class="edge" d="M390,60 V84" marker-end="url(#ah2)"/>
+    <polygon class="decision" points="390,84 500,112 390,140 280,112"/>
+    <text x="390" y="116" text-anchor="middle">in Termux?</text>
+    <path class="edge" d="M500,112 H560" marker-end="url(#ah2)"/>
+    <text class="elabel" x="565" y="116">no → fail ($PREFIX has com.termux)</text>
+
+    <path class="edge" d="M390,140 V164" marker-end="url(#ah2)"/>
+    <polygon class="decision" points="390,164 500,192 390,220 280,192"/>
+    <text x="390" y="196" text-anchor="middle">provider?</text>
+    <path class="edge" d="M500,192 H560" marker-end="url(#ah2)"/>
+    <text class="elabel" x="565" y="188">flag or TTY prompt; Enter = local.</text>
+    <text class="elabel" x="565" y="200">no TTY and no flag → fail</text>
+
+    <path class="edge" d="M390,220 V244" marker-end="url(#ah2)"/>
+    <rect class="box" x="230" y="244" width="320" height="58" rx="6"/>
+    <text class="b" x="390" y="263" text-anchor="middle">packages</text>
+    <text class="s" x="390" y="278" text-anchor="middle">nodejs · ripgrep · file · curl (+ llama-cpp if local)</text>
+    <text class="s" x="390" y="292" text-anchor="middle">then Node 22.19+ check</text>
+
+    <path class="edge" d="M390,302 V326" marker-end="url(#ah2)"/>
+    <rect class="box" x="230" y="326" width="320" height="58" rx="6"/>
+    <text class="b" x="390" y="345" text-anchor="middle">managed pi</text>
+    <text class="s" x="390" y="360" text-anchor="middle">pi.dev/install.sh, replaces an npm pi · --update-pi</text>
+    <text class="s" x="390" y="374" text-anchor="middle">PATH line into ~/.bashrc or ~/.zshrc</text>
+
+    <path class="edge" d="M390,384 V408" marker-end="url(#ah2)"/>
+    <rect class="box" x="230" y="408" width="320" height="44" rx="6"/>
+    <text class="s" x="390" y="427" text-anchor="middle">termux-setup-storage if ~/storage/shared is missing</text>
+    <text class="s" x="390" y="441" text-anchor="middle">mkdir -p ~/.dave/android</text>
+
+    <path class="edge" d="M390,452 V476" marker-end="url(#ah2)"/>
+    <polygon class="decision" points="390,476 500,504 390,532 280,504"/>
+    <text x="390" y="508" text-anchor="middle">which?</text>
+
+    <path class="edge" d="M330,522 H180 V560" marker-end="url(#ah2)"/>
+    <text class="elabel" x="200" y="548">local</text>
+    <rect class="box" x="60" y="560" width="240" height="58" rx="6"/>
+    <text class="b" x="180" y="579" text-anchor="middle">RAM tier → model + ctx</text>
+    <text class="s" x="180" y="594" text-anchor="middle">cores and threads from cpufreq,</text>
+    <text class="s" x="180" y="608" text-anchor="middle">free-space warning under 8 GB</text>
+
+    <path class="edge" d="M450,522 H600 V560" marker-end="url(#ah2)"/>
+    <text class="elabel" x="540" y="548">custom</text>
+    <rect class="box" x="480" y="560" width="240" height="58" rx="6"/>
+    <text class="b" x="600" y="579" text-anchor="middle">connect.mjs --custom</text>
+    <text class="s" x="600" y="594" text-anchor="middle">provider → models.json,</text>
+    <text class="s" x="600" y="608" text-anchor="middle">result → endpoint.json (removed)</text>
+
+    <path class="edge" d="M180,618 V660" marker-end="url(#ah2)"/>
+    <rect class="box" x="60" y="660" width="240" height="44" rx="6"/>
+    <text class="b" x="180" y="679" text-anchor="middle">hardware.json</text>
+    <text class="s" x="180" y="694" text-anchor="middle">provider dave-local · endpoint null</text>
+
+    <path class="edge" d="M600,618 V660" marker-end="url(#ah2)"/>
+    <rect class="box" x="480" y="660" width="240" height="44" rx="6"/>
+    <text class="b" x="600" y="679" text-anchor="middle">hardware.json</text>
+    <text class="s" x="600" y="694" text-anchor="middle">provider &lt;name&gt; · endpoint = base URL</text>
+
+    <path class="edge" d="M180,704 V730 H360 V756" marker-end="url(#ah2)"/>
+    <path class="edge" d="M600,704 V730 H450 V756" marker-end="url(#ah2)"/>
+    <rect class="box" x="230" y="756" width="320" height="58" rx="6"/>
+    <text class="b" x="390" y="775" text-anchor="middle">config.json refresh</text>
+    <text class="s" x="390" y="790" text-anchor="middle">sets only maxReadBytes = min(ctx, 65536);</text>
+    <text class="s" x="390" y="804" text-anchor="middle">every other key kept · chmod 600</text>
+
+    <path class="edge" d="M390,814 V838" marker-end="url(#ah2)"/>
+    <rect class="box" x="230" y="838" width="320" height="58" rx="6"/>
+    <text class="b" x="390" y="857" text-anchor="middle">Done</text>
+    <text class="s" x="390" y="872" text-anchor="middle">loopback → "an app on this phone; keep it running"</text>
+    <text class="s" x="390" y="886" text-anchor="middle">remote → warn "every request goes to &lt;url&gt;"</text>
+  </svg>
+
+  <p>Flags: <code>--provider local|custom</code> answers the model question (needed without a terminal);
+  <code>--model REPO:Q</code>, <code>--ctx</code>, <code>--threads</code>, <code>--port</code> only apply to
+  <code>local</code> (the script warns and ignores them otherwise); <code>--update-pi</code> also refreshes
+  pi. With <code>--provider custom</code>, <code>ENDPOINT_NAME</code>, <code>ENDPOINT_URL</code>,
+  <code>ENDPOINT_API_KEY</code> and <code>ENDPOINT_MODEL</code> answer
+  <a href="../scripts/connect.mjs"><code>connect.mjs</code></a>'s questions.</p>
+
+  <p>The local tiers, straight from the script (<code>MemTotal</code> reads below advertised RAM, so the
+  cutoffs sit lower):</p>
+  <div class="tablewrap"><table>
+    <tr><th>MemTotal</th><th>Model</th><th>ctx</th></tr>
+    <tr><td>≥ 11000 MB</td><td><code>LiquidAI/LFM2.5-8B-A1B-GGUF:Q4_0</code></td><td>32768</td></tr>
+    <tr><td>≥ 7000 MB</td><td><code>LiquidAI/LFM2.5-2.6B-GGUF:Q4_0</code></td><td>16384</td></tr>
+    <tr><td>≥ 3500 MB</td><td><code>LiquidAI/LFM2.5-1.2B-Instruct-GGUF:Q4_0</code></td><td>16384</td></tr>
+    <tr><td>below that</td><td><code>LiquidAI/LFM2.5-350M-GGUF:Q4_0</code></td><td>8192</td></tr>
+  </table></div>
+  <p class="muted">Threads default to the count of cores within 70% of the top frequency (or
+  <code>nproc</code> when cpufreq is hidden). <code>MODEL_ID</code> is the repo basename minus
+  <code>-GGUF</code>.</p>
+</section>
+
+<section id="lifecycle">
+  <h2>4. Start and stop — <a href="../scripts/dave-android.sh"><code>scripts/dave-android.sh</code></a></h2>
+  <svg class="diagram" viewBox="0 0 980 420" role="img" aria-label="Model server lifecycle">
+    <defs>
+      <marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+    </defs>
+
+    <rect class="box" x="30" y="110" width="140" height="56" rx="6"/>
+    <text class="b" x="100" y="134" text-anchor="middle">no server</text>
+    <text class="s" x="100" y="150" text-anchor="middle">(pidfile absent/dead)</text>
+
+    <path class="edge" d="M170,138 H210" marker-end="url(#ah3)"/>
+    <text class="elabel" x="176" y="128">start · serve</text>
+
+    <rect class="box" x="210" y="96" width="190" height="84" rx="6"/>
+    <text class="b" x="305" y="116" text-anchor="middle">starting</text>
+    <text class="s" x="305" y="132" text-anchor="middle">port-free check · log rotate &gt;5MB</text>
+    <text class="s" x="305" y="146" text-anchor="middle">wake lock · nohup llama-server</text>
+    <text class="s" x="305" y="160" text-anchor="middle">-hf &lt;repo:Q4_0&gt; · llm.pid</text>
+
+    <path class="edge" d="M400,138 H440" marker-end="url(#ah3)"/>
+    <text class="elabel" x="404" y="128">/health 3s</text>
+
+    <rect class="box" x="440" y="110" width="140" height="56" rx="6"/>
+    <text class="b" x="510" y="134" text-anchor="middle">serving</text>
+    <text class="s" x="510" y="150" text-anchor="middle">127.0.0.1:&lt;port&gt;</text>
+
+    <path class="edge" d="M580,138 H620" marker-end="url(#ah3)"/>
+    <text class="elabel" x="584" y="128">exec pi</text>
+
+    <rect class="box" x="620" y="110" width="140" height="56" rx="6"/>
+    <text class="b" x="690" y="134" text-anchor="middle">pi open</text>
+    <text class="s" x="690" y="150" text-anchor="middle">on provider/modelId</text>
+
+    <path class="edge" d="M690,166 V210 H510 V166" marker-end="url(#ah3)"/>
+    <text class="elabel" x="540" y="204">/quit or Ctrl+C twice: the model keeps serving</text>
+
+    <path class="edge" d="M510,166 V260 H170 V166" marker-end="url(#ah3)"/>
+    <text class="elabel" x="300" y="252">stop: SIGTERM → up to 10s → SIGKILL · rm pidfile · wake unlock</text>
+
+    <path class="edge dashed" d="M305,180 V230" marker-end="url(#ah3)"/>
+    <rect class="closed" x="230" y="230" width="280" height="52" rx="6"/>
+    <text class="s" x="370" y="250" text-anchor="middle">process died while loading →</text>
+    <text class="s" x="370" y="264" text-anchor="middle">tail log, fail (signal 9: Android killed it)</text>
+
+    <rect class="box" x="800" y="80" width="165" height="130" rx="6"/>
+    <text class="b" x="812" y="100">custom endpoint</text>
+    <text class="s" x="812" y="120">start = exec pi only</text>
+    <text class="s" x="812" y="136">serve refuses:</text>
+    <text class="s" x="812" y="150">"no local model server"</text>
+    <text class="s" x="812" y="168">stop only releases</text>
+    <text class="s" x="812" y="182">the wake lock</text>
+    <text class="s" x="812" y="200">no llama-server at all</text>
+
+    <rect class="box" x="30" y="310" width="935" height="70" rx="6"/>
+    <text class="b" x="42" y="332">the same controls from inside pi</text>
+    <text class="s" x="42" y="350">/dave:android model start|stop|status  →  runs this script: start maps to "serve --no-wait",</text>
+    <text class="s" x="42" y="364">30s timeout, and pi shows the script's last four lines. Also: status · logs [-f].</text>
+  </svg>
+
+  <p>The exact server command: <code>llama-server -hf &lt;repo:quant&gt; --jinja --host 127.0.0.1 --port
+  &lt;port&gt; -c &lt;ctx&gt; -t &lt;threads&gt; --temp 0.1 --top-k 50 --repeat-penalty 1.05</code>. It binds
+  loopback only. While waiting, the script polls <code>/health</code> every 3 seconds (a note every 15s),
+  and fails fast — log tail included — if the process dies.</p>
+</section>
+
+<section id="boot">
+  <h2>5. Extension boot and hooks — <a href="../.pi/extensions/android.ts"><code>.pi/extensions/android.ts</code></a></h2>
+  <svg class="diagram" viewBox="0 0 980 560" role="img" aria-label="Boot sequence of the android extension">
+    <defs>
+      <marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+    </defs>
+
+    <text class="b" x="60" y="26">pi</text>
+    <line class="life" x1="60" y1="34" x2="60" y2="250"/>
+    <text class="b" x="300" y="26">android(pi)</text>
+    <line class="life" x1="300" y1="34" x2="300" y2="250"/>
+    <text class="b" x="620" y="26">state files</text>
+    <line class="life" x1="620" y1="34" x2="620" y2="250"/>
+
+    <path class="edge" d="M60,56 H294" marker-end="url(#ah4)"/>
+    <text class="elabel" x="70" y="50">load extension → android(pi)</text>
+    <text class="s" x="310" y="56">isAndroid()? off the phone → return, nothing registered</text>
+
+    <text class="elabel" x="70" y="86">defaultPlaces() → home · shared · state · protected lists</text>
+    <path class="edge" d="M60,92 H294" marker-end="url(#ah4)"/>
+
+    <text class="elabel" x="70" y="122">registerAndroidTools(pi, places, () =&gt; config) → 8 tools</text>
+    <path class="edge" d="M60,128 H294" marker-end="url(#ah4)"/>
+
+    <path class="edge" d="M300,158 H614" marker-end="url(#ah4)"/>
+    <text class="elabel" x="310" y="152">modelUrl + readChoice → hardware.json</text>
+
+    <text class="s" x="310" y="186">provider "dave-local"? → registerProvider(name "DAVE local (llama.cpp)",</text>
+    <text class="s" x="310" y="200">baseUrl http://127.0.0.1:&lt;port&gt;/v1, ctx, maxTokens 4096)</text>
+
+    <text class="elabel" x="70" y="230">register hooks + command /dave:android</text>
+    <path class="edge" d="M60,236 H294" marker-end="url(#ah4)"/>
+
+    <text class="lt" x="30" y="290">THEN, PER EVENT</text>
+
+    <rect class="box" x="30" y="306" width="290" height="34" rx="6"/>
+    <text class="b" x="42" y="328">session_start</text>
+    <path class="edge" d="M175,340 V356" marker-end="url(#ah4)"/>
+    <rect class="box" x="30" y="356" width="290" height="34" rx="6"/>
+    <text x="42" y="378">loadConfig(places)</text>
+    <path class="edge" d="M175,390 V406" marker-end="url(#ah4)"/>
+    <rect class="box" x="30" y="406" width="290" height="64" rx="6"/>
+    <text class="s" x="42" y="424">saved mount still valid → notify it;</text>
+    <text class="s" x="42" y="438">fails validateMount → set aside,</text>
+    <text class="s" x="42" y="452">warning tells the user why</text>
+
+    <rect class="box" x="350" y="306" width="290" height="34" rx="6"/>
+    <text class="b" x="362" y="328">before_agent_start (every turn)</text>
+    <path class="edge" d="M495,340 V356" marker-end="url(#ah4)"/>
+    <rect class="box" x="350" y="356" width="290" height="34" rx="6"/>
+    <text x="362" y="378">addReachNote(reachNote)</text>
+    <path class="edge" d="M495,390 V406" marker-end="url(#ah4)"/>
+    <rect class="box" x="350" y="406" width="290" height="64" rx="6"/>
+    <text class="s" x="362" y="424">pi passes a sections map → write</text>
+    <text class="s" x="362" y="438">android_files in place; otherwise</text>
+    <text class="s" x="362" y="452">append &lt;android_files&gt; to the prompt</text>
+
+    <rect class="box" x="670" y="306" width="290" height="34" rx="6"/>
+    <text class="b" x="682" y="328">tool_call (pi built-ins + bash)</text>
+    <path class="edge" d="M815,340 V356" marker-end="url(#ah4)"/>
+    <rect class="box" x="670" y="356" width="290" height="34" rx="6"/>
+    <text x="682" y="378">read/ls/grep/find → read · write/edit → write</text>
+    <path class="edge" d="M815,390 V406" marker-end="url(#ah4)"/>
+    <rect class="box" x="670" y="406" width="290" height="64" rx="6"/>
+    <text class="s" x="682" y="424">path → guard() (input.path or ".")</text>
+    <text class="s" x="682" y="438">bash → blockedShellRef(command)</text>
+    <text class="s" x="682" y="452">a throw or a ref → { block, reason }</text>
+  </svg>
+  <p>The command <code>/dave:android</code> is registered the same way; see
+  <a href="#commands">Commands</a> for what it dispatches.</p>
+</section>
+
+<section id="reach">
+  <h2>6. The reach rule — <a href="../.pi/lib/android-guard.ts"><code>.pi/lib/android-guard.ts</code></a></h2>
+  <svg class="diagram" viewBox="0 0 780 330" role="img" aria-label="Zones: what file tools may reach">
+    <rect class="open" x="30" y="30" width="240" height="260" rx="8"/>
+    <text class="b" x="150" y="58" text-anchor="middle">Termux home</text>
+    <text class="s" x="150" y="76" text-anchor="middle">always open</text>
+    <text class="s" x="150" y="110" text-anchor="middle">/data/data/com.termux/files/home</text>
+    <text class="s" x="150" y="126" text-anchor="middle">(~ and $HOME mean this)</text>
+    <text class="s" x="150" y="160" text-anchor="middle">inside it, protected paths</text>
+    <text class="s" x="150" y="174" text-anchor="middle">still apply (see below)</text>
+
+    <rect class="closed" x="310" y="30" width="440" height="260" rx="8"/>
+    <text class="b" x="530" y="58" text-anchor="middle">shared storage — /storage/emulated/0</text>
+    <text class="s" x="530" y="76" text-anchor="middle">closed, except…</text>
+
+    <rect class="open" x="340" y="110" width="230" height="110" rx="8"/>
+    <text class="b" x="455" y="140" text-anchor="middle">the one mounted folder</text>
+    <text class="s" x="455" y="158" text-anchor="middle">a real directory, readable + writable,</text>
+    <text class="s" x="455" y="172" text-anchor="middle">never all of shared storage</text>
+    <text class="s" x="455" y="196" text-anchor="middle">/dave:android mount &lt;folder&gt;</text>
+
+    <text class="s" x="620" y="140" text-anchor="middle">everything else</text>
+    <text class="s" x="620" y="154" text-anchor="middle">here stays closed</text>
+
+    <text class="s" x="390" y="308" text-anchor="middle">aliases: ~ · $HOME · $EXTERNAL_STORAGE · /sdcard (also /mnt/sdcard and the ${...} forms)</text>
+    <text class="s" x="390" y="322" text-anchor="middle">~/storage/emulated/0 is another way of writing shared storage</text>
+  </svg>
+
+  <p>Before any check, the path is expanded and resolved: <code>expand()</code> maps the aliases above,
+  <code>path.resolve</code> anchors it against the working folder, and <code>realish()</code> realpaths the
+  deepest existing ancestor with the missing tail re-appended — so new files work, and <code>..</code> or
+  a symlink like <code>~/storage/shared</code> cannot escape.</p>
+
+  <h3>Check order inside <code>guard()</code></h3>
+  <svg class="diagram" viewBox="0 0 620 480" role="img" aria-label="Decision chain in guard()">
+    <defs>
+      <marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+    </defs>
+
+    <rect class="box" x="130" y="14" width="340" height="40" rx="6"/>
+    <text x="300" y="38" text-anchor="middle">expand → resolve vs cwd → realish</text>
+
+    <path class="edge" d="M300,54 V74" marker-end="url(#ah5)"/>
+    <rect class="decision" x="130" y="74" width="340" height="52" rx="6"/>
+    <text x="300" y="96" text-anchor="middle">a protected name in the path?</text>
+    <text class="s" x="300" y="111" text-anchor="middle">.env (read + write) · .git, .ssh (write only)</text>
+    <path class="edge" d="M470,100 H560" marker-end="url(#ah5)"/>
+    <text class="elabel" x="565" y="104">refuse</text>
+
+    <path class="edge" d="M300,126 V146" marker-end="url(#ah5)"/>
+    <rect class="decision" x="130" y="146" width="340" height="52" rx="6"/>
+    <text x="300" y="168" text-anchor="middle">exactly a read-protected file?</text>
+    <text class="s" x="300" y="183" text-anchor="middle">auth.json · models.json · guard-judge.json (~/.pi/agent)</text>
+    <path class="edge" d="M470,172 H560" marker-end="url(#ah5)"/>
+    <text class="elabel" x="565" y="176">refuse</text>
+
+    <path class="edge" d="M300,198 V218" marker-end="url(#ah5)"/>
+    <rect class="decision" x="130" y="218" width="340" height="56" rx="6"/>
+    <text x="300" y="240" text-anchor="middle">write: inside, or holding, a protected path?</text>
+    <text class="s" x="300" y="255" text-anchor="middle">~/.dave/android · ~/.pi/agent · repo .pi/extensions,</text>
+    <text class="s" x="300" y="268" text-anchor="middle">.pi/lib, guard.jsonc, mcp.json</text>
+    <path class="edge" d="M470,246 H560" marker-end="url(#ah5)"/>
+    <text class="elabel" x="565" y="250">refuse</text>
+
+    <path class="edge" d="M300,274 V290" marker-end="url(#ah5)"/>
+    <rect class="decision" x="130" y="290" width="340" height="52" rx="6"/>
+    <text x="300" y="312" text-anchor="middle">inside home or the mount?</text>
+    <text class="s" x="300" y="327" text-anchor="middle">roots() = realish(home) + realish(mount)</text>
+
+    <path class="edge" d="M300,342 V356 H210 V372" marker-end="url(#ah5)"/>
+    <path class="edge" d="M300,342 V356 H455 V372" marker-end="url(#ah5)"/>
+    <rect class="open" x="130" y="372" width="160" height="44" rx="6"/>
+    <text x="210" y="391" text-anchor="middle">yes → return the</text>
+    <text x="210" y="405" text-anchor="middle">real path</text>
+
+    <rect class="closed" x="330" y="372" width="250" height="44" rx="6"/>
+    <text x="455" y="391" text-anchor="middle">no → error naming the mount,</text>
+    <text x="455" y="405" text-anchor="middle">or "run /dave:android mount"</text>
+  </svg>
+  <p class="muted">The third box runs only for writes, and checks containment in both directions —
+  so a folder that <em>contains</em> a protected path can't be moved out and back.</p>
+
+  <h3>bash</h3>
+  <p>Shell commands get a best-effort <em>text</em> check only: <code>blockedShellRef()</code> refuses any
+  command that mentions <code>.dave/android</code>, and runs each shared-storage-looking reference
+  (<code>~/storage/*</code>, <code>$EXTERNAL_STORAGE</code>, <code>/sdcard</code>, <code>/storage/…</code>)
+  through <code>guard()</code>. A determined command can get around a text check; the skill file tells the
+  model not to try.</p>
+</section>
+
+<section id="toolcall">
+  <h2>7. A tool call, end to end</h2>
+  <svg class="diagram" viewBox="0 0 980 430" role="img" aria-label="Sequence: from a model's tool call to a capped result">
+    <defs>
+      <marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ah"/></marker>
+    </defs>
+
+    <text class="b" x="90" y="26">model</text>
+    <line class="life" x1="90" y1="34" x2="90" y2="390"/>
+    <text class="b" x="270" y="26">pi</text>
+    <line class="life" x1="270" y1="34" x2="270" y2="390"/>
+    <text class="b" x="470" y="26">tool_call hooks</text>
+    <line class="life" x1="470" y1="34" x2="470" y2="390"/>
+    <text class="b" x="740" y="26">tool → guard() → fs</text>
+    <line class="life" x1="740" y1="34" x2="740" y2="390"/>
+
+    <path class="edge" d="M90,60 H264" marker-end="url(#ah6)"/>
+    <text class="elabel" x="100" y="54">emits a call: read_file, write, bash…</text>
+
+    <path class="edge" d="M270,92 H464" marker-end="url(#ah6)"/>
+    <text class="elabel" x="280" y="86">every registered hook runs; any can block</text>
+
+    <rect class="box" x="490" y="104" width="440" height="60" rx="6"/>
+    <text class="s" x="502" y="122">guard.ts → guard.jsonc rules: allow · ask · never · check,</text>
+    <text class="s" x="502" y="136">then the catastrophic last look (type RUN)</text>
+    <text class="s" x="502" y="152">android.ts → built-ins through guard(); bash via blockedShellRef</text>
+
+    <path class="edge dashed" d="M470,182 H276" marker-end="url(#ah6)"/>
+    <text class="elabel" x="300" y="176">block → { block, reason } — never runs</text>
+
+    <path class="edge" d="M270,214 H734" marker-end="url(#ah6)"/>
+    <text class="elabel" x="300" y="208">else execute</text>
+
+    <text class="s" x="750" y="238">DAVE's tools call guard() again per path,</text>
+    <text class="s" x="750" y="252">then the fs op; pi's own tools already passed</text>
+
+    <path class="edge" d="M740,284 H96" marker-end="url(#ah6)"/>
+    <text class="elabel" x="110" y="278">capped result back to the model</text>
+
+    <rect class="box" x="490" y="310" width="440" height="60" rx="6"/>
+    <text class="s" x="502" y="330">caps: list_dir 200 entries · read_file maxReadBytes ·</text>
+    <text class="s" x="502" y="344">search_files 100 matches / 300-char lines</text>
+    <text class="s" x="502" y="360">delete_path: needs "delete on" AND the guard's ask</text>
+  </svg>
+  <p>So a DAVE tool is checked twice from different directions: the repo-wide guard decides whether the
+  call may happen at all, and the reach rule decides where the path may point.</p>
+</section>
+
+<section id="tools">
+  <h2>8. Tools — <a href="../.pi/lib/android-tools.ts"><code>.pi/lib/android-tools.ts</code></a></h2>
+  <p>Every path goes through <code>guard()</code> first; errors are thrown and pi reports them to the
+  model. Output is capped so one call can't fill a small local model's context.</p>
+  <div class="tablewrap"><table>
+    <tr><th>Tool</th><th>What it does</th><th>Caps / rules</th></tr>
+    <tr><td><code>list_dir</code></td><td>type (d/f/l), size, modified, name; links show their target (<code>-&gt;</code>), so Termux's <code>~/storage/*</code> links are visible</td><td>first 200 entries, then a "[n more]" note</td></tr>
+    <tr><td><code>read_file</code></td><td>reads a text file from a byte offset</td><td><code>maxReadBytes</code> per call; the cut backs off to a UTF-8 boundary; a NUL byte → "binary file; use file_info"; ends with a next-offset hint when truncated</td></tr>
+    <tr><td><code>write_file</code></td><td>create or overwrite; creates parent folders</td><td>atomic: temp file + rename, keeps the old file's mode, temp removed on failure</td></tr>
+    <tr><td><code>edit_file</code></td><td>replaces <code>old_text</code> with <code>new_text</code></td><td>old_text must match exactly once; same atomic write</td></tr>
+    <tr><td><code>move_path</code></td><td>move or rename inside the allowed areas</td><td>never overwrites (destination must not exist); refuses to move home or the mount itself; across filesystems (EXDEV): copy then remove</td></tr>
+    <tr><td><code>delete_path</code></td><td>removes a file or folder</td><td>off unless <code>/dave:android delete on</code>; refuses home or the mount itself; <code>recursive</code> optional</td></tr>
+    <tr><td><code>search_files</code></td><td>ripgrep: <code>content</code> mode (regex, <code>-n --max-count 5</code> per file) or <code>name</code> mode (glob, <code>--files -g</code>)</td><td>100 matches, 300-char lines, 60s timeout; appends a hint when the mount is outside the searched folder</td></tr>
+    <tr><td><code>file_info</code></td><td>path, dir flag, size, modified time, MIME type</td><td>MIME from <code>file -b --mime-type</code> (10s, "unknown" on failure)</td></tr>
+  </table></div>
+</section>
+
+<section id="providers">
+  <h2>9. Model providers compared</h2>
+  <div class="tablewrap"><table>
+    <tr><th></th><th><code>dave-local</code></th><th>custom, loopback</th><th>custom, remote</th></tr>
+    <tr><td>What serves /v1</td><td><code>llama-server</code> on the phone, 127.0.0.1:&lt;port&gt;</td><td>an app on the phone (e.g. an OpenAI-compatible API on 127.0.0.1)</td><td>a remote server</td></tr>
+    <tr><td>Provider registered by</td><td>the extension: <code>pi.registerProvider</code> at boot</td><td colspan="2"><code>connect.mjs --custom</code> → a block in <code>~/.pi/agent/models.json</code></td></tr>
+    <tr><td>Wake lock</td><td>held while the model serves</td><td colspan="2">none (<code>serve</code> refuses; <code>start</code> skips it)</td></tr>
+    <tr><td>Android notes shown</td><td>child-process restrictions + battery</td><td>battery for Termux, plus "the serving app needs its own battery/background settings"</td><td>battery for Termux</td></tr>
+    <tr><td>Network wording</td><td>"first start downloads the model; after that, only 127.0.0.1"</td><td>"an app on this phone at &lt;endpoint&gt; · requests stay on this phone"</td><td>"every request … over the internet or your network"</td></tr>
+    <tr><td><code>serve</code> / <code>stop</code></td><td>serve starts llama-server; stop SIGTERMs it and releases the wake lock</td><td colspan="2">serve refuses ("there is no local model server"); stop only releases the wake lock</td></tr>
+    <tr><td>hardware.json endpoint</td><td><code>null</code></td><td colspan="2">the base URL connect.mjs resolved (e.g. <code>…/v1</code>)</td></tr>
+    <tr><td>Loopback test</td><td>—</td><td colspan="2"><code>isLoopback()</code>: hostname is localhost, a 127.0.0.0/8 address, or ::1</td></tr>
+  </table></div>
+  <p>A custom provider is picked in <code>readChoice()</code> only by name — anything not
+  <code>dave-local</code> is treated as an endpoint, and pi already knows it from models.json.</p>
+</section>
+
+<section id="commands">
+  <h2>10. Commands</h2>
+  <h3>In pi</h3>
+  <div class="tablewrap"><table>
+    <tr><th>You run</th><th>What happens</th></tr>
+    <tr><td><code>/dave:android</code> (or <code>status</code>)</td><td>mount + delete status; the permissions report shows as a widget the first time (<code>permissions-shown</code> marks it), or any time with <code>permissions</code></td></tr>
+    <tr><td><code>/dave:android permissions</code></td><td>the permissions report with live checks (files access, server state, wake lock)</td></tr>
+    <tr><td><code>/dave:android mount &lt;folder&gt;</code></td><td>validates then asks you to confirm (needs a UI); saves to config.json</td></tr>
+    <tr><td><code>/dave:android unmount</code></td><td>clears the mount; saved</td></tr>
+    <tr><td><code>/dave:android delete on|off</code></td><td>flips <code>allowDelete</code>; saved</td></tr>
+    <tr><td><code>/dave:android model start|stop|status</code></td><td>runs <code>dave-android.sh</code> — start maps to <code>serve --no-wait</code>, 30s timeout, last four lines shown</td></tr>
+  </table></div>
+  <h3>In the shell</h3>
+  <div class="tablewrap"><table>
+    <tr><th>You run</th><th>What happens</th></tr>
+    <tr><td><code>dave-android.sh start [pi args]</code></td><td>serves the local model first (<code>dave-local</code> only), then <code>exec pi --model &lt;provider&gt;/&lt;id&gt;</code></td></tr>
+    <tr><td><code>dave-android.sh serve [--no-wait]</code></td><td>just the model server; refuses for a custom endpoint</td></tr>
+    <tr><td><code>dave-android.sh stop</code></td><td>SIGTERM → up to 10s → SIGKILL; removes the pidfile; releases the wake lock either way</td></tr>
+    <tr><td><code>dave-android.sh status</code></td><td>provider/model, server pid + health, wake lock, files access, mount and delete</td></tr>
+    <tr><td><code>dave-android.sh logs [-f]</code></td><td>last 50 lines of llm.log (<code>-f</code> follows)</td></tr>
+  </table></div>
+</section>
+
+<section id="decisions">
+  <h2>11. Design decisions</h2>
+  <div class="cards">
+    <div class="card"><h3>One reach rule for everything</h3>
+      <p>DAVE's eight tools and pi's built-ins go through the same <code>guard()</code>. Two enforcement
+      points, one rule: there is no second policy to keep in sync.</p></div>
+    <div class="card"><h3>Real paths, not string matching</h3>
+      <p><code>realish()</code> resolves the deepest existing ancestor, so <code>..</code> and symlinks
+      such as <code>~/storage/shared</code> can't launder an outside path into an allowed one.</p></div>
+    <div class="card"><h3>One folder, never all of shared storage</h3>
+      <p><code>validateMount()</code> refuses shared storage itself and anything outside it, and requires
+      a readable+writable directory. The mount is the only door into shared storage.</p></div>
+    <div class="card"><h3>Delete is off, and still asks</h3>
+      <p><code>allowDelete</code> defaults false; even when on, <code>guard.jsonc</code> keeps
+      <code>delete_path</code> at <code>ask</code>. Two switches a model can't flip for itself.</p></div>
+    <div class="card"><h3>The model can't change its own permissions</h3>
+      <p><code>~/.dave/android</code>, <code>~/.pi/agent</code>, the extension and lib folders,
+      <code>guard.jsonc</code> and <code>mcp.json</code> are write-protected — including any folder that
+      contains them, so move-out/move-back doesn't work either.</p></div>
+    <div class="card"><h3>The reach note repeats every turn</h3>
+      <p>Small models lose track of the mount. <code>before_agent_start</code> re-states the exact paths,
+      the mount's aliases, and that searching home doesn't reach it.</p></div>
+    <div class="card"><h3>Caps sized for small models</h3>
+      <p>200 entries, <code>maxReadBytes</code> (setup writes <code>min(ctx, 65536)</code>, default 8192),
+      100 matches, 300-char lines. Enough to work with, not enough to swamp a small context.</p></div>
+    <div class="card"><h3>Scripts own lifecycle; the extension stays thin</h3>
+      <p>Starting, stopping, pidfiles, wake locks and logs all live in <code>dave-android.sh</code>;
+      <code>/dave:android model …</code> just calls it. One implementation, two front ends.</p></div>
+    <div class="card"><h3>The endpoint option reuses connect.mjs</h3>
+      <p><code>--custom</code> is the same code path desktop setup uses for the studio: the provider lands
+      in models.json the same way, and setup only records the choice.</p></div>
+    <div class="card"><h3>Managed pi, not npm</h3>
+      <p>pi comes from its own installer (<code>pi.dev/install.sh</code>) into <code>~/.pi/agent</code>;
+      npm can hand out an older release, so an npm pi is replaced.</p></div>
+    <div class="card"><h3>Q4_0 tiers</h3>
+      <p>Liquid recommends Q4_0 on phones and llama.cpp repacks it into Arm kernels. Some repos also ship
+      a <code>-QAD-Q4_0</code> file, but <code>-hf repo:Q4_0</code> resolves deterministically to the
+      plain file — llama.cpp takes the first regex match in HF's lexically sorted listing, and
+      <code>-Q4_0.</code> sorts before <code>-QAD-</code>.</p></div>
+  </div>
+</section>
+
+<section id="tests">
+  <h2>12. Tests and limits</h2>
+  <h3>Tests</h3>
+  <div class="tablewrap"><table>
+    <tr><th>File</th><th>What it covers</th></tr>
+    <tr><td><a href="../tests/android-guard.test.mjs"><code>tests/android-guard.test.mjs</code></a></td>
+      <td>Builds a fake phone (Termux home, storage links, protected files): home-only reach without a mount;
+      refused <code>..</code>/symlink/shared escapes; mounting one folder (never all of storage) and the
+      <code>~/storage/emulated/0</code> mix-up; the reach note's exact paths and both prompt-delivery
+      paths; write protection including move-out/move-back; tampered config failing closed; bash text
+      checks that catch shared paths and look-alikes that don't.</td></tr>
+    <tr><td><a href="../tests/android-permissions.test.mjs"><code>tests/android-permissions.test.mjs</code></a></td>
+      <td><code>isLoopback</code>: true for localhost, 127.0.0.1, 127.1.2.3, [::1]; false for a LAN
+      address, a domain, and an unparseable string.</td></tr>
+    <tr><td><a href="../tests/connect-custom.test.mjs"><code>tests/connect-custom.test.mjs</code></a></td>
+      <td><code>connect.mjs --custom</code> against a stub /v1/models server: the result file
+      (provider, model, contextWindow, baseUrl), other providers kept, a placeholder API key for a
+      keyless endpoint, and the chosen model's list order.</td></tr>
+  </table></div>
+  <h3>Known limits</h3>
+  <ul>
+    <li>The <code>bash</code> check is a text check — best effort, documented as such in
+      <a href="../docs/android.md"><code>docs/android.md</code></a>.</li>
+    <li>Not yet verified on a device (same list as the docs): that Termux's <code>llama-cpp</code>
+      package can download with <code>-hf</code>, and whether the largest tier fits in free memory on a
+      12GB phone.</li>
+    <li>The <code>fetch</code> MCP server fails at startup on the phone — it needs <code>uvx</code>,
+      which setup doesn't install.</li>
+  </ul>
+  <p class="muted">See <a href="../docs/android.md"><code>docs/android.md</code></a> for the user-facing
+  setup, permissions and troubleshooting list.</p>
+</section>
+
+</main>
+</div>
+
+<script>
+  // Nice-to-haves: scroll-spy in the nav, and a light/dark/auto theme toggle.
+  (function () {
+    var btn = document.getElementById("themeBtn");
+    var modes = ["auto", "light", "dark"];
+    function apply(mode) {
+      if (mode === "auto") delete document.documentElement.dataset.theme;
+      else document.documentElement.dataset.theme = mode;
+      btn.textContent = "theme: " + mode;
+      try { localStorage.setItem("dave-arch-theme", mode === "auto" ? "" : mode); } catch {}
+    }
+    var saved = "auto";
+    try { saved = localStorage.getItem("dave-arch-theme") || "auto"; } catch {}
+    apply(modes.indexOf(saved) >= 0 ? saved : "auto");
+    btn.hidden = false;
+    btn.addEventListener("click", function () {
+      apply(modes[(modes.indexOf(btn.textContent.slice(7)) + 1) % 3]);
+    });
+
+    var links = Array.prototype.slice.call(document.querySelectorAll("nav.toc a"));
+    var byHash = {};
+    links.forEach(function (a) { byHash[a.getAttribute("href").slice(1)] = a; });
+    var spy = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) {
+          links.forEach(function (a) { a.classList.remove("active"); });
+          var a = byHash[e.target.id];
+          if (a) a.classList.add("active");
+        }
+      });
+    }, { rootMargin: "-10% 0px -80% 0px" });
+    links.forEach(function (a) {
+      var s = document.getElementById(a.getAttribute("href").slice(1));
+      if (s) spy.observe(s);
+    });
+  })();
+</script>
+</body>
+</html>
